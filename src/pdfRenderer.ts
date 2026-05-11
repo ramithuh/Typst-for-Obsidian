@@ -90,6 +90,19 @@ export class PdfRenderer {
         // Get page count
         const pageCount = this.pdfium.FPDF_GetPageCount(docPtr);
 
+        // Reuse existing per-page DOM if structure matches. This avoids
+        // tearing down the canvas/text/link layers on every recompile
+        // and lets the user keep seeing the prior preview during render
+        // (no empty-flash). On mismatch (different page count), wipe
+        // and rebuild fresh.
+        const existing = Array.from(
+          container.querySelectorAll(":scope > .typst-pdf-page"),
+        ) as HTMLElement[];
+        const canReuse = existing.length === pageCount;
+        if (!canReuse) {
+          container.empty();
+        }
+
         // Render all pages
         for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
           await this.renderPage(
@@ -99,6 +112,7 @@ export class PdfRenderer {
             enableTextLayer,
             onBacklinkClick,
             onJumpFromClick,
+            canReuse ? existing[pageIndex] : null,
           );
         }
       } finally {
@@ -119,6 +133,7 @@ export class PdfRenderer {
     enableTextLayer: boolean,
     onBacklinkClick?: BacklinkClickHandler,
     onJumpFromClick?: JumpFromClickHandler,
+    reuseContainer?: HTMLElement | null,
   ): Promise<void> {
     if (!this.pdfium) throw new Error("PDFium not initialized");
 
@@ -138,20 +153,67 @@ export class PdfRenderer {
       const scaledWidth = Math.floor(width * effectiveScale);
       const scaledHeight = Math.floor(height * effectiveScale);
 
-      // Create page container
-      const pageContainer = container.createDiv("typst-pdf-page");
-      pageContainer.style.position = "relative";
-      pageContainer.style.width = `${scaledWidth / dpr}px`;
-      pageContainer.style.height = `${scaledHeight / dpr}px`;
-      pageContainer.style.marginBottom = "20px";
-      pageContainer.style.setProperty("--scale-factor", scale.toString());
-      pageContainer.style.opacity = "0";
+      // Page container + canvas: reuse the previous compile's elements
+      // when dimensions match, so the user keeps seeing the prior preview
+      // while we re-rasterize, and we skip allocating fresh nodes.
+      let pageContainer: HTMLElement;
+      let canvas: HTMLCanvasElement;
+      let isNewContainer = false;
+
+      if (reuseContainer) {
+        const existingCanvas = reuseContainer.querySelector(
+          ":scope > canvas",
+        ) as HTMLCanvasElement | null;
+        if (
+          existingCanvas &&
+          existingCanvas.width === scaledWidth &&
+          existingCanvas.height === scaledHeight
+        ) {
+          pageContainer = reuseContainer;
+          canvas = existingCanvas;
+          // Strip the prior compile's text/link layers; we'll rebuild.
+          reuseContainer
+            .querySelectorAll(":scope > .textLayer, :scope > .linkLayer")
+            .forEach((n) => n.remove());
+        } else {
+          // Dimensions changed — empty the reuse container in place to
+          // preserve its position in the parent flow.
+          reuseContainer.empty();
+          pageContainer = reuseContainer;
+          pageContainer.style.width = `${scaledWidth / dpr}px`;
+          pageContainer.style.height = `${scaledHeight / dpr}px`;
+          canvas = pageContainer.createEl("canvas");
+          canvas.width = scaledWidth;
+          canvas.height = scaledHeight;
+          canvas.style.display = "block";
+          canvas.style.width = `${scaledWidth / dpr}px`;
+          canvas.style.height = `${scaledHeight / dpr}px`;
+        }
+      } else {
+        pageContainer = container.createDiv("typst-pdf-page");
+        pageContainer.style.position = "relative";
+        pageContainer.style.width = `${scaledWidth / dpr}px`;
+        pageContainer.style.height = `${scaledHeight / dpr}px`;
+        pageContainer.style.marginBottom = "20px";
+        pageContainer.style.setProperty("--scale-factor", scale.toString());
+        pageContainer.style.opacity = "0";
+        isNewContainer = true;
+
+        canvas = pageContainer.createEl("canvas");
+        canvas.width = scaledWidth;
+        canvas.height = scaledHeight;
+        canvas.style.display = "block";
+        canvas.style.width = `${scaledWidth / dpr}px`;
+        canvas.style.height = `${scaledHeight / dpr}px`;
+      }
 
       // Click-to-source: any click on the page that doesn't hit a
       // link (the link layer handles those separately) is routed
       // through onJumpFromClick with PDF-space coordinates.
       // pageContainer CSS px == PDF pt * scale, so divide by scale.
-      if (onJumpFromClick) {
+      // Attach only on fresh containers — listeners on reused
+      // containers carry over from the prior render.
+      if (onJumpFromClick && isNewContainer) {
         pageContainer.style.cursor = "text";
         pageContainer.addEventListener("click", (e) => {
           let el = e.target as HTMLElement | null;
@@ -165,14 +227,6 @@ export class PdfRenderer {
           onJumpFromClick(pageIndex, pdfX, pdfY);
         });
       }
-
-      // Create canvas
-      const canvas = pageContainer.createEl("canvas");
-      canvas.width = scaledWidth;
-      canvas.height = scaledHeight;
-      canvas.style.display = "block";
-      canvas.style.width = `${scaledWidth / dpr}px`;
-      canvas.style.height = `${scaledHeight / dpr}px`;
 
       // Create bitmap for rendering
       const bitmapPtr = this.pdfium.FPDFBitmap_Create(

@@ -387,7 +387,6 @@ export default class TypstForObsidian extends Plugin {
       },
     };
 
-    const _t0 = performance.now();
     this.compilerWorker.postMessage(message);
 
     while (true) {
@@ -431,9 +430,6 @@ export default class TypstForObsidian extends Plugin {
 
       if (result && result.type === "pdfResult") {
         if (result.error) throw new Error(result.error);
-        console.log(
-          `[typst-perf] worker→main roundtrip: ${(performance.now() - _t0).toFixed(1)}ms (source=${finalSource.length}chars)`,
-        );
         return result.data;
       } else if (result && result.error) {
         throw new Error(result.error);

@@ -661,13 +661,20 @@ export class TypstView extends TextFileView {
     const contentEl = this.getContentElement();
     if (!contentEl) return;
 
-    contentEl.empty();
-    this.cleanupEditor();
-
-    const readingDiv = contentEl.createDiv("typst-reading-mode");
+    // Reuse the existing reading-mode div if one is already there from a
+    // previous compile — keeps the prior preview visible while we
+    // re-rasterize, avoiding an empty-flash on every recompile. The
+    // editor is only torn down on a fresh entry (from source mode).
+    let readingDiv = contentEl.querySelector(
+      ":scope > .typst-reading-mode",
+    ) as HTMLElement | null;
+    if (!readingDiv) {
+      contentEl.empty();
+      this.cleanupEditor();
+      readingDiv = contentEl.createDiv("typst-reading-mode");
+    }
 
     try {
-      const _renderT0 = performance.now();
       await this.pdfRenderer.renderPdf(
         pdfData,
         readingDiv,
@@ -766,9 +773,6 @@ export class TypstView extends TextFileView {
             await new Promise((r) => setTimeout(r, 50));
           }
         },
-      );
-      console.log(
-        `[typst-perf] pdfRenderer.renderPdf: ${(performance.now() - _renderT0).toFixed(1)}ms`,
       );
       const savedScroll = this.stateManager.getSavedReadingScrollTop();
 
