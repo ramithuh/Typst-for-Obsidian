@@ -371,7 +371,7 @@
   background: var(--background-primary);
   min-height: 100%;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 /* =========================== PDF Page Container =========================== */

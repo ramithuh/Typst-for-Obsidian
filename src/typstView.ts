@@ -751,18 +751,33 @@ export class TypstView extends TextFileView {
             }
           }
 
-          // 4. File isn't open anywhere — open it in a new tab and jump.
+          // 4. File isn't open anywhere — open it in a sibling pane if
+          //    one exists, otherwise fall back to a new tab. Prefer
+          //    reusing an existing non-preview pane (typically the
+          //    user has source on one side, preview on the other) so
+          //    the source lands beside the preview instead of piling
+          //    up as a new tab on top of it.
           const targetFile = this.app.vault.getAbstractFileByPath(vaultPath);
           if (!(targetFile instanceof TFile)) {
             new Notice(`Could not find ${vaultPath}`, 3000);
             return;
           }
-          const newLeaf = this.app.workspace.getLeaf("tab");
-          await newLeaf.openFile(targetFile);
-          this.app.workspace.setActiveLeaf(newLeaf, { focus: true });
+          let targetLeaf: any = null;
+          const root = this.leaf.getRoot();
+          this.app.workspace.iterateAllLeaves((other) => {
+            if (targetLeaf) return;
+            if (other === this.leaf) return;
+            if (other.getRoot() !== root) return;
+            targetLeaf = other;
+          });
+          if (!targetLeaf) {
+            targetLeaf = this.app.workspace.getLeaf("tab");
+          }
+          await targetLeaf.openFile(targetFile);
+          this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
           // Poll for the new view to mount and the editor to be ready.
           for (let i = 0; i < 30; i++) {
-            const view = newLeaf.view;
+            const view = targetLeaf.view;
             if (view instanceof TypstView) {
               if (view.getCurrentMode() !== "source") {
                 await view.toggleMode();
