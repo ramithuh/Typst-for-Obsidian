@@ -1,4 +1,14 @@
-# Typst for Obsidian
+# Typst for Obsidian (fork)
+
+> **This is a fork of [k0src/Typst-for-Obsidian](https://github.com/k0src/Typst-for-Obsidian) with a fix for the blank in-app preview pane.**
+>
+> Upstream `0.0.13` ships with `@embedpdf/pdfium@^1.3.13`, whose PDFium WASM module fails to instantiate in current Electron/V8 with `LinkError: ... Import #6 "env" "invoke_vi": function import requires a callable`. The result is a blank preview pane (PDF export was unaffected since it bypasses PDFium). Tracks upstream [issue #10](https://github.com/k0src/Typst-for-Obsidian/issues/10).
+>
+> **Fix:** bumped `@embedpdf/pdfium` and `@embedpdf/engines` to `^2.14.2`, whose JS glue and WASM build are back in sync.
+>
+> **Install:** grab the release from [v0.0.13-pdfium-fix](https://github.com/ramithuh/Typst-for-Obsidian/releases/tag/v0.0.13-pdfium-fix), drop `main.js`, `manifest.json`, `styles.css`, and `obsidian_typst_bg.wasm` into `<vault>/.obsidian/plugins/typst-for-obsidian/`, and enable the plugin.
+
+---
 
 Typst for Obsidian is a [Typst](https://typst.app) editor integrated directly into [Obsidian](https://obsidian.md), enabling you to create and preview Typst documents seamlessly within your notes. Create `.typ` files, edit with syntax highlighting, and render PDFs that adapt to your Obsidian theme.
 
