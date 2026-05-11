@@ -41,6 +41,12 @@ export default class TypstForObsidian extends Plugin {
   fontManager: FontManager;
   snippetManager: SnippetManager;
   textEncoder: TextEncoder;
+  // Number of lines the most recent compile prepended (layout function +
+  // newline separator) on top of the user's source.  Used to subtract
+  // when interpreting jump_from_click results that land in the main file.
+  lastCompilePrefixLines: number = 0;
+  // Vault path of the most recent compile's main file.
+  lastCompilePath: string = "";
   fs: any;
   wasmPath: string;
   pluginPath: string;
@@ -306,18 +312,22 @@ export default class TypstForObsidian extends Plugin {
     compileType: "internal" | "export" = "internal",
   ): Promise<Uint8Array> {
     let finalSource = source;
+    let prefix = "";
 
     if (
       compileType === "export" &&
       this.settings.usePdfLayoutFunctions &&
       this.settings.pdfLayoutFunctions.trim()
     ) {
-      finalSource = this.settings.pdfLayoutFunctions + "\n" + source;
+      prefix = this.settings.pdfLayoutFunctions;
     } else if (this.settings.useDefaultLayoutFunctions) {
-      finalSource = this.settings.customLayoutFunctions + "\n" + source;
+      prefix = this.settings.customLayoutFunctions;
     } else {
-      finalSource = "#set page(margin: (x: 0.25em, y: 0.25em))\n" + source;
+      prefix = "#set page(margin: (x: 0.25em, y: 0.25em))";
     }
+    finalSource = prefix + "\n" + source;
+    this.lastCompilePrefixLines = (prefix.match(/\n/g)?.length ?? 0) + 1;
+    this.lastCompilePath = path;
 
     if (compileType === "internal") {
       finalSource = finalSource + "\n#linebreak()\n#linebreak()";
@@ -380,6 +390,39 @@ export default class TypstForObsidian extends Plugin {
         throw new Error("Invalid PDF response format");
       }
     }
+  }
+
+  // Resolve a click in the rendered PDF preview back to its source
+  // location, using the WASM compiler's stored last document.
+  // Returns null if no span was found under the click.
+  async jumpFromClick(
+    page: number,
+    x: number,
+    y: number,
+  ): Promise<{
+    file: string;
+    line: number;
+    column: number;
+    byte_offset: number;
+  } | null> {
+    this.compilerWorker.postMessage({
+      type: "jump",
+      data: { page, x, y },
+    });
+
+    return new Promise((resolve) => {
+      const listener = (ev: MessageEvent) => {
+        if (!ev.data || ev.data.type !== "jumpResult") return;
+        this.compilerWorker.removeEventListener("message", listener);
+        if (ev.data.error) {
+          console.error("jump_from_click failed:", ev.data.error);
+          resolve(null);
+          return;
+        }
+        resolve(ev.data.data || null);
+      };
+      this.compilerWorker.addEventListener("message", listener);
+    });
   }
 
   async handleWorkerRequest({ buffer: wbuffer, path }: WorkerRequest) {

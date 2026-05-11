@@ -396,6 +396,15 @@ export class TypstView extends TextFileView {
     return this.currentMode;
   }
 
+  // Scroll the Monaco editor in this view to (line, column). No-op
+  // if the view is not in source mode or the editor is not mounted.
+  // Returns true on success.
+  public jumpToSourcePosition(line: number, column: number): boolean {
+    if (this.currentMode !== "source" || !this.typstEditor) return false;
+    this.typstEditor.goToLine(line, column);
+    return true;
+  }
+
   public async recompileIfInReadingMode(): Promise<void> {
     if (this.currentMode === "reading") {
       const pdfData = await this.compile();
@@ -670,6 +679,59 @@ export class TypstView extends TextFileView {
               newTab ? "tab" : false,
             );
           }
+        },
+        async (page: number, x: number, y: number) => {
+          const result = await this.plugin.jumpFromClick(page, x, y);
+          if (!result) return;
+          const vaultPath = result.file.replace(/^\//, "");
+
+          // typst byte_to_line_column is 0-indexed; Monaco is 1-indexed.
+          // Subtract the layout-function prefix the compile injected
+          // *only* for the main file (the one that was prefixed).
+          // Included files weren't prefixed, so their lines are correct.
+          let zeroLine = result.line;
+          if (vaultPath === this.plugin.lastCompilePath) {
+            zeroLine -= this.plugin.lastCompilePrefixLines;
+          }
+          if (zeroLine < 0) return;
+          const line = zeroLine + 1;
+          const col = result.column + 1;
+
+          // 1. Paired source view (split preview) — preferred target.
+          if (
+            this.pairedView &&
+            this.pairedView.file?.path === vaultPath &&
+            this.pairedView.jumpToSourcePosition(line, col)
+          ) {
+            this.app.workspace.setActiveLeaf(this.pairedView.leaf, {
+              focus: true,
+            });
+            return;
+          }
+
+          // 2. Any other open typst-view leaf in source mode for the
+          //    target file.
+          const leaves = this.app.workspace.getLeavesOfType("typst-view");
+          for (const leaf of leaves) {
+            const view = leaf.view;
+            if (
+              view instanceof TypstView &&
+              view !== this &&
+              view.file?.path === vaultPath &&
+              view.jumpToSourcePosition(line, col)
+            ) {
+              this.app.workspace.setActiveLeaf(leaf, { focus: true });
+              return;
+            }
+          }
+
+          // 3. No source pane is open for this file. Don't auto-toggle
+          //    the current preview — the user opted into preview mode.
+          //    Surface the location so they can act on it.
+          new Notice(
+            `Click resolved to ${vaultPath}:${line}:${col} — open the file in source mode to jump.`,
+            4000,
+          );
         },
       );
       const savedScroll = this.stateManager.getSavedReadingScrollTop();

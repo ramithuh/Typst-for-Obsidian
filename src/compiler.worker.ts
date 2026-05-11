@@ -132,6 +132,23 @@ onmessage = (ev: MessageEvent<Message>) => {
         postMessage({ error: error.toString() });
       }
       break;
+    case "jump":
+      if (!compiler) {
+        postMessage({ type: "jumpResult", data: null });
+        return;
+      }
+      try {
+        const d = message.data;
+        const result = compiler.jump_from_click(d.page, d.x, d.y);
+        postMessage({ type: "jumpResult", data: result });
+      } catch (error) {
+        postMessage({
+          type: "jumpResult",
+          data: null,
+          error: error.toString(),
+        });
+      }
+      break;
     case "packages":
       packages = message.data;
       break;

@@ -3,6 +3,12 @@ import { requestUrl } from "obsidian";
 import { PDFIUM_WASM_URL } from "./util/constants";
 import { BACKLINK_URI_PREFIX } from "./backlinkParser";
 
+export type JumpFromClickHandler = (
+  page: number,
+  x: number,
+  y: number,
+) => void;
+
 export type BacklinkClickHandler = (
   linkTarget: string,
   newTab: boolean,
@@ -51,6 +57,7 @@ export class PdfRenderer {
     container: HTMLElement,
     enableTextLayer: boolean = true,
     onBacklinkClick?: BacklinkClickHandler,
+    onJumpFromClick?: JumpFromClickHandler,
   ): Promise<void> {
     try {
       await this.ensurePdfiumInitialized();
@@ -91,6 +98,7 @@ export class PdfRenderer {
             container,
             enableTextLayer,
             onBacklinkClick,
+            onJumpFromClick,
           );
         }
       } finally {
@@ -110,6 +118,7 @@ export class PdfRenderer {
     container: HTMLElement,
     enableTextLayer: boolean,
     onBacklinkClick?: BacklinkClickHandler,
+    onJumpFromClick?: JumpFromClickHandler,
   ): Promise<void> {
     if (!this.pdfium) throw new Error("PDFium not initialized");
 
@@ -137,6 +146,25 @@ export class PdfRenderer {
       pageContainer.style.marginBottom = "20px";
       pageContainer.style.setProperty("--scale-factor", scale.toString());
       pageContainer.style.opacity = "0";
+
+      // Click-to-source: any click on the page that doesn't hit a
+      // link (the link layer handles those separately) is routed
+      // through onJumpFromClick with PDF-space coordinates.
+      // pageContainer CSS px == PDF pt * scale, so divide by scale.
+      if (onJumpFromClick) {
+        pageContainer.style.cursor = "text";
+        pageContainer.addEventListener("click", (e) => {
+          let el = e.target as HTMLElement | null;
+          while (el && el !== pageContainer) {
+            if (el.tagName === "A") return;
+            el = el.parentElement;
+          }
+          const rect = pageContainer.getBoundingClientRect();
+          const pdfX = (e.clientX - rect.left) / scale;
+          const pdfY = (e.clientY - rect.top) / scale;
+          onJumpFromClick(pageIndex, pdfX, pdfY);
+        });
+      }
 
       // Create canvas
       const canvas = pageContainer.createEl("canvas");
