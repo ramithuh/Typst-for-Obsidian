@@ -47,6 +47,10 @@ export default class TypstForObsidian extends Plugin {
   lastCompilePrefixLines: number = 0;
   // Vault path of the most recent compile's main file.
   lastCompilePath: string = "";
+  // Monotonic counter to tag compile requests so overlapping compiles
+  // don't pick up each other's PDF bytes (the race we hit when rapid
+  // edits triggered both live-preview and dependency-update compiles).
+  private nextCompileRequestId: number = 0;
   fs: any;
   wasmPath: string;
   pluginPath: string;
@@ -62,6 +66,42 @@ export default class TypstForObsidian extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.metadataIndexer.indexAll();
     });
+
+    // Tell the WASM compiler to drop its cached source whenever a .typ
+    // file in the vault changes, so the next compile re-reads it.
+    const invalidate = (path: string) => {
+      if (!path.endsWith(".typ")) return;
+      this.compilerWorker?.postMessage({
+        type: "invalidate",
+        data: { path },
+      });
+    };
+    this.registerEvent(
+      this.app.vault.on("modify", (f) => {
+        if (!f.path.endsWith(".typ")) return;
+        invalidate(f.path);
+        // Recompile every open typst-view in reading mode. This is
+        // the same strategy tinymist uses (Myriad-Dreamin/tinymist,
+        // crates/tinymist-project/src/compiler.rs ProjectCompiler's
+        // Interrupt::Fs handler): on any file change, notify the VFS
+        // and re-trigger compile of the project entry point.
+        // `comemo` (which typst memoizes through) detects which work
+        // actually depends on the changed file and reruns only that;
+        // unrelated work is a microsecond memo-hit. So there's no
+        // need for a reverse-include graph walk on our side — let
+        // comemo do it.
+        this.recompileAllReadingViews();
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (f) => invalidate(f.path)),
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (f, oldPath) => {
+        invalidate(oldPath);
+        invalidate(f.path);
+      }),
+    );
     this.snippetManager = new SnippetManager();
     await this.loadSettings();
 
@@ -336,26 +376,42 @@ export default class TypstForObsidian extends Plugin {
     finalSource = this.templateProvider.replaceVariables(finalSource);
     finalSource = this.backlinkParser.replaceBacklinks(finalSource, path);
 
+    const requestId = ++this.nextCompileRequestId;
     const message = {
       type: "compile",
       data: {
         format: "pdf",
         path,
         source: finalSource,
+        requestId,
       },
     };
 
+    const _t0 = performance.now();
     this.compilerWorker.postMessage(message);
 
     while (true) {
       const result = await new Promise<any>((resolve, reject) => {
         const listener = (ev: MessageEvent) => {
-          if (ev.data && ev.data.type === "ready") {
+          if (!ev.data) return;
+          if (ev.data.type === "ready") return;
+          // File-fetch requests have buffer+path and no requestId
+          // tag; let those pass through to the upstream handler.
+          if (ev.data.buffer && ev.data.path) {
+            remove();
+            resolve(ev.data);
             return;
           }
-
-          remove();
-          resolve(ev.data);
+          // Only resolve when the response carries OUR requestId.
+          // Anything else is a sibling compile's reply — ignore it
+          // and let the sibling's listener pick it up.
+          if (
+            ev.data.type === "pdfResult" &&
+            ev.data.requestId === requestId
+          ) {
+            remove();
+            resolve(ev.data);
+          }
         };
 
         const errorListener = (error: ErrorEvent) => {
@@ -373,13 +429,12 @@ export default class TypstForObsidian extends Plugin {
         this.compilerWorker.addEventListener("error", errorListener);
       });
 
-      if (
-        result instanceof Uint8Array ||
-        (result &&
-          result.constructor &&
-          result.constructor.name === "Uint8Array")
-      ) {
-        return result;
+      if (result && result.type === "pdfResult") {
+        if (result.error) throw new Error(result.error);
+        console.log(
+          `[typst-perf] worker→main roundtrip: ${(performance.now() - _t0).toFixed(1)}ms (source=${finalSource.length}chars)`,
+        );
+        return result.data;
       } else if (result && result.error) {
         throw new Error(result.error);
       } else if (result && result.buffer && result.path) {
@@ -423,6 +478,21 @@ export default class TypstForObsidian extends Plugin {
       };
       this.compilerWorker.addEventListener("message", listener);
     });
+  }
+
+  // Iterate every open typst-view and recompile any that are in
+  // reading mode. Driven by vault file-change events. See the comment
+  // in onload's vault.on("modify") handler for the rationale.
+  private recompileAllReadingViews(): void {
+    const leaves = this.app.workspace.getLeavesOfType("typst-view");
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view instanceof TypstView) {
+        // recompileIfInReadingMode is a no-op when the view is in
+        // source mode, so we can call it unconditionally.
+        void view.recompileIfInReadingMode();
+      }
+    }
   }
 
   async handleWorkerRequest({ buffer: wbuffer, path }: WorkerRequest) {

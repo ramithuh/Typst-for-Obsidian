@@ -125,11 +125,32 @@ onmessage = (ev: MessageEvent<Message>) => {
           postMessage(result);
         } else if (message.data.format == "pdf") {
           const data: CompilePdfCommand = message.data;
+          const t0 = performance.now();
           const result = compiler.compile_pdf(data.source, data.path);
-          postMessage(result);
+          const t1 = performance.now();
+          console.log(
+            `[typst-perf] worker compile_pdf: ${(t1 - t0).toFixed(1)}ms (pdf=${result.byteLength}B)`,
+          );
+          postMessage({
+            type: "pdfResult",
+            requestId: message.data.requestId,
+            data: result,
+          });
         }
       } catch (error) {
-        postMessage({ error: error.toString() });
+        postMessage({
+          type: "pdfResult",
+          requestId: message.data?.requestId,
+          error: error.toString(),
+        });
+      }
+      break;
+    case "invalidate":
+      if (!compiler) break;
+      try {
+        compiler.invalidate_path(message.data.path);
+      } catch (error) {
+        console.error("Worker: invalidate_path failed:", error);
       }
       break;
     case "jump":

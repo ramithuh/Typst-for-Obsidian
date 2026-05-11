@@ -128,6 +128,13 @@ impl Compiler {
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
+    /// Drop the cached source/bytes for `path` so the next compile
+    /// re-reads it. Call when the vault file at `path` is modified,
+    /// renamed, or deleted. Idempotent; no-op if `path` was never read.
+    pub fn invalidate_path(&mut self, path: String) {
+        self.world.invalidate_path(&path);
+    }
+
     pub fn add_font(&mut self, data: Vec<u8>) {
         self.world.add_font(data);
     }

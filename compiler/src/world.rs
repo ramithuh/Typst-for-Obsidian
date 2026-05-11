@@ -52,11 +52,17 @@ impl SystemWorld {
 
         self.main = FileId::new(None, VirtualPath::new(path));
         self.files.get_mut().insert(self.main, FileEntry::new(self.main, text));
-        typst
+        let result = typst
             ::compile(self)
             .output.map_err(|errors|
                 format_diagnostic(self.files.get_mut().borrow(), &errors).into()
-            )
+            );
+        // Keep recent memoized layout around (depth N); only entries
+        // older than N compile cycles are evicted.  Invalidations of
+        // changed files (via `invalidate_path`) cause comemo to detect
+        // dependency changes and re-run only the affected memos.
+        comemo::evict(5);
+        result
     }
 
     pub fn add_font(&mut self, data: Vec<u8>) {
@@ -80,8 +86,23 @@ impl SystemWorld {
     }
 
     fn reset(&mut self) {
+        // Note: we do NOT clear the file cache here. Stale entries
+        // are pruned via `invalidate_path` driven by vault events.
         self.packages.get_mut().clear();
         self.now.take();
+    }
+
+    pub fn invalidate_path(&mut self, path: &str) {
+        let files = self.files.get_mut();
+        files.retain(|id, _| {
+            let p = id.vpath().as_rooted_path();
+            // Stored paths come from VirtualPath, which is rooted ("/foo/bar.typ").
+            // The JS side may send either rooted or vault-relative form.
+            let stored = p.to_string_lossy();
+            let stored_unrooted = stored.trim_start_matches('/');
+            let req_unrooted = path.trim_start_matches('/');
+            stored_unrooted != req_unrooted
+        });
     }
 
     fn request_data(&self, param1: String) -> Result<JsValue, JsValue> {
