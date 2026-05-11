@@ -1,9 +1,15 @@
 use fast_image_resize as fr;
+use serde::Serialize;
+use typst::{
+    layout::{Abs, PagedDocument, Point},
+    World,
+};
 use wasm_bindgen::prelude::*;
 use web_sys::ImageData;
 
 mod diagnostic;
 mod file_entry;
+mod jump;
 mod render;
 mod world;
 
@@ -13,6 +19,15 @@ use crate::world::SystemWorld;
 pub struct Compiler {
     resizer: fr::Resizer,
     world: SystemWorld,
+    last_doc: Option<PagedDocument>,
+}
+
+#[derive(Serialize)]
+struct JumpResult {
+    file: String,
+    line: usize,
+    column: usize,
+    byte_offset: usize,
 }
 
 #[wasm_bindgen]
@@ -24,6 +39,7 @@ impl Compiler {
         Self {
             world: SystemWorld::new(root, request_data),
             resizer: fr::Resizer::default(),
+            last_doc: None,
         }
     }
 
@@ -34,18 +50,82 @@ impl Compiler {
         pixel_per_pt: f32,
         fill: String,
         size: u32,
-        display: bool
+        display: bool,
     ) -> Result<ImageData, JsValue> {
         let document = self.world.compile(text, path)?;
-        render::to_image(&mut self.resizer, document, pixel_per_pt, fill, size, display)
+        let image = render::to_image(&mut self.resizer, &document, pixel_per_pt, fill, size, display);
+        self.last_doc = Some(document);
+        image
     }
 
     pub fn compile_svg(&mut self, text: String, path: String) -> Result<String, JsValue> {
-        self.world.compile(text, path).map(|document| render::to_svg(document))
+        let document = self.world.compile(text, path)?;
+        let svg = render::to_svg(&document);
+        self.last_doc = Some(document);
+        Ok(svg)
     }
 
     pub fn compile_pdf(&mut self, text: String, path: String) -> Result<Vec<u8>, JsValue> {
-        self.world.compile(text, path).and_then(|document| render::to_pdf(document))
+        let document = self.world.compile(text, path)?;
+        let pdf = render::to_pdf(&document)?;
+        self.last_doc = Some(document);
+        Ok(pdf)
+    }
+
+    /// Given a click at (x, y) in PDF user-space (points) on a 0-indexed
+    /// page of the most recently compiled document, return the source
+    /// location at that position, or null if none.  Adapted from
+    /// `tinymist-query/src/jump.rs::jump_from_click` — see jump.rs.
+    pub fn jump_from_click(
+        &self,
+        page: u32,
+        x: f32,
+        y: f32,
+    ) -> Result<JsValue, JsValue> {
+        let doc = self
+            .last_doc
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("no document compiled yet"))?;
+        let frame = doc
+            .pages
+            .get(page as usize)
+            .map(|p| &p.frame)
+            .ok_or_else(|| JsValue::from_str("page out of range"))?;
+
+        let click = Point::new(Abs::pt(x as f64), Abs::pt(y as f64));
+
+        let (span, offset) = match jump::jump_from_click(&self.world, frame, click) {
+            Some(hit) => hit,
+            None => return Ok(JsValue::NULL),
+        };
+
+        let id = match span.id() {
+            Some(id) => id,
+            None => return Ok(JsValue::NULL),
+        };
+        let source = self
+            .world
+            .source(id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let span_range = match source.range(span) {
+            Some(r) => r,
+            None => return Ok(JsValue::NULL),
+        };
+        let byte = span_range.start + offset;
+        let (line, column) = source
+            .lines()
+            .byte_to_line_column(byte)
+            .unwrap_or((0, 0));
+        let file = id.vpath().as_rooted_path().to_string_lossy().to_string();
+
+        let result = JumpResult {
+            file,
+            line,
+            column,
+            byte_offset: byte,
+        };
+        serde_wasm_bindgen::to_value(&result)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     pub fn add_font(&mut self, data: Vec<u8>) {

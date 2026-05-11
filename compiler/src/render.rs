@@ -6,7 +6,7 @@ use web_sys::ImageData;
 
 pub fn to_image(
     resizer: &mut Resizer,
-    document: PagedDocument,
+    document: &PagedDocument,
     pixel_per_pt: f32,
     fill: String,
     size: u32,
@@ -68,14 +68,14 @@ pub fn to_image(
     );
 }
 
-pub fn to_svg(document: PagedDocument) -> String {
+pub fn to_svg(document: &PagedDocument) -> String {
     typst_svg::svg(&document.pages[0])
 }
 
-pub fn to_pdf(document: PagedDocument) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+pub fn to_pdf(document: &PagedDocument) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
     let pdf_options = typst_pdf::PdfOptions::default();
 
-    match typst_pdf::pdf(&document, &pdf_options) {
+    match typst_pdf::pdf(document, &pdf_options) {
         Ok(pdf_bytes) => Ok(pdf_bytes),
         Err(e) => Err(wasm_bindgen::JsValue::from_str(&format!("PDF compilation failed: {:?}", e))),
     }
