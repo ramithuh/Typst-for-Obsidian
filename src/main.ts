@@ -16,6 +16,7 @@ import { TypstSettingTab } from "./settings/settingsTab";
 import { TypstSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import { TemplateVariableProvider } from "./templateVariableProvider";
 import { BacklinkParser, BACKLINK_URI_PREFIX } from "./backlinkParser";
+import { MetadataIndexer } from "./metadataIndexer";
 import { PackageManager } from "./packageManager";
 import { FontManager } from "./fontManager";
 import { SnippetManager } from "./snippetManager";
@@ -35,6 +36,7 @@ export default class TypstForObsidian extends Plugin {
   compilerWorker: Worker;
   templateProvider: TemplateVariableProvider;
   backlinkParser: BacklinkParser;
+  metadataIndexer: MetadataIndexer;
   packageManager: PackageManager;
   fontManager: FontManager;
   snippetManager: SnippetManager;
@@ -49,6 +51,11 @@ export default class TypstForObsidian extends Plugin {
     this.textEncoder = new TextEncoder();
     this.templateProvider = new TemplateVariableProvider();
     this.backlinkParser = new BacklinkParser(this.app);
+    this.metadataIndexer = new MetadataIndexer(this);
+    this.metadataIndexer.register();
+    this.app.workspace.onLayoutReady(() => {
+      this.metadataIndexer.indexAll();
+    });
     this.snippetManager = new SnippetManager();
     await this.loadSettings();
 
