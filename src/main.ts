@@ -80,6 +80,7 @@ export default class TypstForObsidian extends Plugin {
       this.app.vault.on("modify", (f) => {
         if (!f.path.endsWith(".typ")) return;
         invalidate(f.path);
+        if (!this.settings.autoRecompileOnDependencyChange) return;
         // Recompile every open typst-view in reading mode. This is
         // the same strategy tinymist uses (Myriad-Dreamin/tinymist,
         // crates/tinymist-project/src/compiler.rs ProjectCompiler's
@@ -456,11 +457,6 @@ export default class TypstForObsidian extends Plugin {
     column: number;
     byte_offset: number;
   } | null> {
-    this.compilerWorker.postMessage({
-      type: "jump",
-      data: { page, x, y },
-    });
-
     return new Promise((resolve) => {
       const listener = (ev: MessageEvent) => {
         if (!ev.data || ev.data.type !== "jumpResult") return;
@@ -473,6 +469,10 @@ export default class TypstForObsidian extends Plugin {
         resolve(ev.data.data || null);
       };
       this.compilerWorker.addEventListener("message", listener);
+      this.compilerWorker.postMessage({
+        type: "jump",
+        data: { page, x, y },
+      });
     });
   }
 
@@ -489,6 +489,44 @@ export default class TypstForObsidian extends Plugin {
         void view.recompileIfInReadingMode();
       }
     }
+  }
+
+  // Inverse of jumpFromClick: given a cursor at (line, column) in the
+  // source file at `path` (0-indexed), find the (page, x, y) in PDF
+  // user-space pt that corresponds to that cursor in the rendered
+  // document. For the main compile file, the caller is responsible
+  // for shifting `line` by `lastCompilePrefixLines` so the cursor
+  // hits the right offset inside the combined source the WASM sees.
+  async cursorToPreview(
+    path: string,
+    line: number,
+    column: number,
+  ): Promise<{ page: number; x: number; y: number } | null> {
+    return new Promise((resolve) => {
+      const listener = (ev: MessageEvent) => {
+        if (!ev.data || ev.data.type !== "cursorResult") return;
+        this.compilerWorker.removeEventListener("message", listener);
+        if (ev.data.error) {
+          // "no document compiled yet" is expected when the cursor
+          // moves before a preview has rendered; silently no-op.
+          if (
+            typeof ev.data.error === "string" &&
+            !ev.data.error.includes("no document")
+          ) {
+            console.error("cursor_to_preview failed:", ev.data.error);
+          }
+          resolve(null);
+          return;
+        }
+        resolve(ev.data.data || null);
+      };
+      // Register before posting so a synchronous reply can't be missed.
+      this.compilerWorker.addEventListener("message", listener);
+      this.compilerWorker.postMessage({
+        type: "cursor",
+        data: { path, line, column },
+      });
+    });
   }
 
   async handleWorkerRequest({ buffer: wbuffer, path }: WorkerRequest) {

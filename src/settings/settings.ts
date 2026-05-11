@@ -80,6 +80,18 @@ export interface TypstSettings {
   openPdfOnExport: boolean;
   enableLivePreview: boolean;
   livePreviewDebounce: number;
+  // Source → preview cursor sync (scroll preview to editor cursor)
+  enableSourceToPreviewSync: boolean;
+  sourceToPreviewSyncDebounce: number;
+  // Auto-recompile open previews when any .typ file in the vault changes
+  autoRecompileOnDependencyChange: boolean;
+  // Where a click-to-source jump lands when the target file isn't open yet
+  crossFileJumpTarget:
+    | "sibling-pane-or-tab"
+    | "new-tab"
+    | "new-split-right"
+    | "new-split-down"
+    | "current-pane";
   customSnippets: string;
   syntaxHighlightColors: SyntaxHighlightColors;
   useObsidianTextColor: boolean;
@@ -102,6 +114,10 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   openPdfOnExport: false,
   enableLivePreview: true,
   livePreviewDebounce: 500,
+  enableSourceToPreviewSync: true,
+  sourceToPreviewSyncDebounce: 120,
+  autoRecompileOnDependencyChange: true,
+  crossFileJumpTarget: "sibling-pane-or-tab",
   useObsidianTextColor: false,
   useObsidianMonospaceFont: true,
   editorFontSize: 14,

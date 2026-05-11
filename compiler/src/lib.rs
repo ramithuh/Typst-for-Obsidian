@@ -30,6 +30,13 @@ struct JumpResult {
     byte_offset: usize,
 }
 
+#[derive(Serialize)]
+struct CursorResult {
+    page: usize,
+    x: f64,
+    y: f64,
+}
+
 #[wasm_bindgen]
 impl Compiler {
     #[wasm_bindgen(constructor)]
@@ -123,6 +130,42 @@ impl Compiler {
             line,
             column,
             byte_offset: byte,
+        };
+        serde_wasm_bindgen::to_value(&result)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Inverse of `jump_from_click`: given a cursor at (line, column)
+    /// in the source file at `path` (both 0-indexed), find a point in
+    /// the rendered document that corresponds to that cursor. Returns
+    /// `{ page, x, y }` in PDF user-space pt, or null. Adapted from
+    /// tinymist's `jump_from_cursor` — see jump.rs.
+    pub fn cursor_to_preview(
+        &self,
+        path: String,
+        line: u32,
+        column: u32,
+    ) -> Result<JsValue, JsValue> {
+        let doc = self
+            .last_doc
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("no document compiled yet"))?;
+
+        let hit = match jump::cursor_to_preview(
+            &self.world,
+            doc,
+            &path,
+            line as usize,
+            column as usize,
+        ) {
+            Some(h) => h,
+            None => return Ok(JsValue::NULL),
+        };
+
+        let result = CursorResult {
+            page: hit.0,
+            x: hit.1,
+            y: hit.2,
         };
         serde_wasm_bindgen::to_value(&result)
             .map_err(|e| JsValue::from_str(&e.to_string()))

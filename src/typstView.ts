@@ -8,7 +8,7 @@ import {
 } from "obsidian";
 import { TypstEditor } from "./typstEditor";
 import TypstForObsidian from "./main";
-import { PdfRenderer } from "./pdfRenderer";
+import { PdfRenderer, PDF_RENDER_SCALE } from "./pdfRenderer";
 import { ViewActionBar } from "./ui/viewActionBar";
 import { EditorStateManager } from "./editorStateManager";
 import { CompilationManager, CompilationResult } from "./compilationManager";
@@ -91,6 +91,11 @@ export class TypstView extends TextFileView {
     this.actionBar?.destroy();
     this.stateManager.clear();
     this.compilationManager.destroy();
+
+    if (this.cursorSyncTimer != null) {
+      window.clearTimeout(this.cursorSyncTimer);
+      this.cursorSyncTimer = null;
+    }
 
     if (this.pairedView) {
       this.pairedView.clearPairedView();
@@ -587,7 +592,7 @@ export class TypstView extends TextFileView {
     return this.fileContent;
   }
 
-  private getContentElement(): HTMLElement | null {
+  public getContentElement(): HTMLElement | null {
     return this.containerEl.querySelector(".view-content") as HTMLElement;
   }
 
@@ -620,11 +625,144 @@ export class TypstView extends TextFileView {
         this.fileContent = content;
         this.handleContentChange(content);
       },
+      (line: number, column: number) => {
+        this.handleCursorChange(line, column);
+      },
     );
 
     this.typstEditor.initialize(this.fileContent).catch((err) => {
       console.error("Failed to initialize Typst editor:", err);
     });
+  }
+
+  // Choose where a click-to-source jump should open a not-yet-open
+  // file. Mirrors the user's crossFileJumpTarget setting.
+  private pickCrossFileJumpTarget(): WorkspaceLeaf {
+    const mode = this.plugin.settings.crossFileJumpTarget;
+    switch (mode) {
+      case "new-tab":
+        return this.app.workspace.getLeaf("tab");
+      case "new-split-right":
+        return this.app.workspace.getLeaf("split", "vertical");
+      case "new-split-down":
+        return this.app.workspace.getLeaf("split", "horizontal");
+      case "current-pane":
+        return this.leaf;
+      case "sibling-pane-or-tab":
+      default: {
+        let sibling: WorkspaceLeaf | null = null;
+        const root = this.leaf.getRoot();
+        this.app.workspace.iterateAllLeaves((other) => {
+          if (sibling) return;
+          if (other === this.leaf) return;
+          if (other.getRoot() !== root) return;
+          sibling = other;
+        });
+        return sibling ?? this.app.workspace.getLeaf("tab");
+      }
+    }
+  }
+
+  // Debounced source→preview sync: when the editor cursor moves,
+  // find a sibling typst-view that's previewing the same file and
+  // scroll it to the corresponding rendered position. Mirrors
+  // click-to-source in the other direction.
+  private cursorSyncTimer: number | null = null;
+  private handleCursorChange(line: number, column: number): void {
+    if (!this.plugin.settings.enableSourceToPreviewSync) return;
+    if (this.cursorSyncTimer != null) {
+      window.clearTimeout(this.cursorSyncTimer);
+    }
+    const delay = this.plugin.settings.sourceToPreviewSyncDebounce;
+    this.cursorSyncTimer = window.setTimeout(() => {
+      this.cursorSyncTimer = null;
+      void this.scrollPreviewToCursor(line, column);
+    }, delay);
+  }
+
+  // Scroll a `readingDiv` so the point (yPx in CSS px) within the
+  // page at index `pageIdx` lands roughly centered in the viewport.
+  private scrollReadingDivToPageY(
+    readingDiv: HTMLElement,
+    pageIdx: number,
+    yPx: number,
+  ): void {
+    const pageContainers = readingDiv.querySelectorAll(
+      ":scope > .typst-pdf-page",
+    );
+    const pageContainer = pageContainers[pageIdx] as HTMLElement | undefined;
+    if (!pageContainer) return;
+
+    // Walk up to find the first ancestor that actually scrolls. The
+    // CSS sets overflow on .typst-reading-mode but in practice the
+    // view's contentEl is what scrolls.
+    let scroller: HTMLElement | null = readingDiv;
+    let depth = 0;
+    while (scroller) {
+      const overflowY = window.getComputedStyle(scroller).overflowY;
+      const scrollable = scroller.scrollHeight > scroller.clientHeight + 1;
+      if (scrollable && (overflowY === "auto" || overflowY === "scroll")) {
+        break;
+      }
+      scroller = scroller.parentElement;
+      depth++;
+      if (depth > 10) break;
+    }
+    if (!scroller) return;
+
+    const pageRect = pageContainer.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    const targetViewportY = pageRect.top + yPx;
+    const delta =
+      targetViewportY - scrollerRect.top - scroller.clientHeight / 2;
+    scroller.scrollTop += delta;
+  }
+
+  private async scrollPreviewToCursor(
+    line: number,
+    column: number,
+  ): Promise<void> {
+    const filePath = this.file?.path;
+    if (!filePath) return;
+
+    let previewReadingDiv: HTMLElement | null = null;
+    const leaves = this.app.workspace.getLeavesOfType("typst-view");
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof TypstView)) continue;
+      if (view === this) continue;
+      if (view.getCurrentMode() !== "reading") continue;
+      const contentEl = view.getContentElement();
+      if (!contentEl) continue;
+      previewReadingDiv =
+        (contentEl.querySelector(
+          ":scope > .typst-reading-mode",
+        ) as HTMLElement | null) ??
+        (contentEl.querySelector(
+          ".typst-reading-mode",
+        ) as HTMLElement | null);
+      if (previewReadingDiv) break;
+    }
+    if (!previewReadingDiv) return;
+
+    let queryLine = line;
+    if (filePath === this.plugin.lastCompilePath) {
+      queryLine += this.plugin.lastCompilePrefixLines;
+    }
+
+    const result = await this.plugin.cursorToPreview(
+      filePath,
+      queryLine,
+      column,
+    );
+    if (!result) return;
+    // The view (or the preview's DOM) may have been torn down during
+    // the async round-trip — bail before touching a detached element.
+    if (!previewReadingDiv.isConnected) return;
+    if (!this.file) return;
+
+    const yPx = result.y * PDF_RENDER_SCALE;
+    this.scrollReadingDivToPageY(previewReadingDiv, result.page, yPx);
   }
 
   private handleContentChange(content: string): void {
@@ -751,28 +889,14 @@ export class TypstView extends TextFileView {
             }
           }
 
-          // 4. File isn't open anywhere — open it in a sibling pane if
-          //    one exists, otherwise fall back to a new tab. Prefer
-          //    reusing an existing non-preview pane (typically the
-          //    user has source on one side, preview on the other) so
-          //    the source lands beside the preview instead of piling
-          //    up as a new tab on top of it.
+          // 4. File isn't open anywhere — pick a destination leaf per
+          //    the crossFileJumpTarget setting.
           const targetFile = this.app.vault.getAbstractFileByPath(vaultPath);
           if (!(targetFile instanceof TFile)) {
             new Notice(`Could not find ${vaultPath}`, 3000);
             return;
           }
-          let targetLeaf: any = null;
-          const root = this.leaf.getRoot();
-          this.app.workspace.iterateAllLeaves((other) => {
-            if (targetLeaf) return;
-            if (other === this.leaf) return;
-            if (other.getRoot() !== root) return;
-            targetLeaf = other;
-          });
-          if (!targetLeaf) {
-            targetLeaf = this.app.workspace.getLeaf("tab");
-          }
+          const targetLeaf = this.pickCrossFileJumpTarget();
           await targetLeaf.openFile(targetFile);
           this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
           // Poll for the new view to mount and the editor to be ready.

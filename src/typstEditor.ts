@@ -18,6 +18,7 @@ export class TypstEditor {
   private container: HTMLElement;
   private content: string = "";
   private onContentChange?: (content: string) => void;
+  private onCursorChange?: (line: number, column: number) => void;
   private plugin: TypstForObsidian;
   private snippetManager: SnippetManager;
   private completionDisposable: monaco.IDisposable | null = null;
@@ -27,10 +28,12 @@ export class TypstEditor {
     container: HTMLElement,
     plugin: TypstForObsidian,
     onContentChange?: (content: string) => void,
+    onCursorChange?: (line: number, column: number) => void,
   ) {
     this.container = container;
     this.plugin = plugin;
     this.onContentChange = onContentChange;
+    this.onCursorChange = onCursorChange;
     this.snippetManager = new SnippetManager();
   }
 
@@ -127,6 +130,13 @@ export class TypstEditor {
         if (this.onContentChange) {
           this.onContentChange(this.content);
         }
+      }
+    });
+
+    this.monacoEditor.onDidChangeCursorPosition((e) => {
+      if (this.onCursorChange) {
+        // Monaco is 1-indexed, plugin/Rust use 0-indexed.
+        this.onCursorChange(e.position.lineNumber - 1, e.position.column - 1);
       }
     });
 

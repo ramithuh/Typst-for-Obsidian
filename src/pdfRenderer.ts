@@ -3,6 +3,12 @@ import { requestUrl } from "obsidian";
 import { PDFIUM_WASM_URL } from "./util/constants";
 import { BACKLINK_URI_PREFIX } from "./backlinkParser";
 
+// PDF-pt to CSS-px multiplier applied to rendered pages. Exported
+// so callers that overlay or compute positions on the rendered
+// preview (click-to-source, source-to-preview sync) use the same
+// scale and don't drift from this renderer.
+export const PDF_RENDER_SCALE = 1.5;
+
 export type JumpFromClickHandler = (
   page: number,
   x: number,
@@ -147,7 +153,7 @@ export class PdfRenderer {
       // Get page dimensions
       const width = this.pdfium.FPDF_GetPageWidthF(pagePtr);
       const height = this.pdfium.FPDF_GetPageHeightF(pagePtr);
-      const scale = 1.5;
+      const scale = PDF_RENDER_SCALE;
       const dpr = window.devicePixelRatio || 1;
       const effectiveScale = scale * dpr;
       const scaledWidth = Math.floor(width * effectiveScale);

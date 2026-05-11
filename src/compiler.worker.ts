@@ -148,6 +148,23 @@ onmessage = (ev: MessageEvent<Message>) => {
         console.error("Worker: invalidate_path failed:", error);
       }
       break;
+    case "cursor":
+      if (!compiler) {
+        postMessage({ type: "cursorResult", data: null });
+        return;
+      }
+      try {
+        const d = message.data;
+        const result = compiler.cursor_to_preview(d.path, d.line, d.column);
+        postMessage({ type: "cursorResult", data: result });
+      } catch (error) {
+        postMessage({
+          type: "cursorResult",
+          data: null,
+          error: error.toString(),
+        });
+      }
+      break;
     case "jump":
       if (!compiler) {
         postMessage({ type: "jumpResult", data: null });

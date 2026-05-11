@@ -305,6 +305,70 @@ export class TypstSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName("Auto-recompile preview on dependency change")
+      .setDesc(
+        "When any .typ file in the vault is saved, recompile every open preview that depends on it. Turn off if vault edits are causing unwanted recompiles.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoRecompileOnDependencyChange)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.autoRecompileOnDependencyChange = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Sync preview to editor cursor")
+      .setDesc(
+        "As you move the cursor in the editor, scroll the preview pane to the corresponding rendered location.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableSourceToPreviewSync)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableSourceToPreviewSync = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Cursor sync debounce delay")
+      .setDesc(
+        "Milliseconds to wait after the cursor stops moving before scrolling the preview (50-1000ms).",
+      )
+      .addSlider((slider) =>
+        slider
+          .setLimits(50, 1000, 10)
+          .setValue(this.plugin.settings.sourceToPreviewSyncDebounce)
+          .setDynamicTooltip()
+          .onChange(async (value: number) => {
+            this.plugin.settings.sourceToPreviewSyncDebounce = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Cross-file jump target")
+      .setDesc(
+        "Where to open a file when click-to-source resolves to a file that isn't already open. 'Sibling pane or new tab' reuses an existing other pane in the same root split before falling back to a new tab.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("sibling-pane-or-tab", "Sibling pane or new tab")
+          .addOption("new-tab", "New tab")
+          .addOption("new-split-right", "New split (right)")
+          .addOption("new-split-down", "New split (down)")
+          .addOption("current-pane", "Replace current pane")
+          .setValue(this.plugin.settings.crossFileJumpTarget)
+          .onChange(async (value: string) => {
+            this.plugin.settings.crossFileJumpTarget =
+              value as TypstSettings["crossFileJumpTarget"];
+            await this.plugin.saveSettings();
+          }),
+      );
+
     const syntaxHeading = new Setting(containerEl)
       .setHeading()
       .setName("Syntax Highlighting");
