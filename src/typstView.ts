@@ -667,6 +667,7 @@ export class TypstView extends TextFileView {
     const readingDiv = contentEl.createDiv("typst-reading-mode");
 
     try {
+      const _renderT0 = performance.now();
       await this.pdfRenderer.renderPdf(
         pdfData,
         readingDiv,
@@ -725,14 +726,49 @@ export class TypstView extends TextFileView {
             }
           }
 
-          // 3. No source pane is open for this file. Don't auto-toggle
-          //    the current preview — the user opted into preview mode.
-          //    Surface the location so they can act on it.
-          new Notice(
-            `Click resolved to ${vaultPath}:${line}:${col} — open the file in source mode to jump.`,
-            4000,
-          );
+          // 3. Existing leaf shows the file in reading mode — toggle to
+          //    source and jump.
+          for (const leaf of leaves) {
+            const view = leaf.view;
+            if (
+              view instanceof TypstView &&
+              view !== this &&
+              view.file?.path === vaultPath
+            ) {
+              await view.toggleMode();
+              await new Promise((r) => setTimeout(r, 100));
+              if (view.jumpToSourcePosition(line, col)) {
+                this.app.workspace.setActiveLeaf(leaf, { focus: true });
+              }
+              return;
+            }
+          }
+
+          // 4. File isn't open anywhere — open it in a new tab and jump.
+          const targetFile = this.app.vault.getAbstractFileByPath(vaultPath);
+          if (!(targetFile instanceof TFile)) {
+            new Notice(`Could not find ${vaultPath}`, 3000);
+            return;
+          }
+          const newLeaf = this.app.workspace.getLeaf("tab");
+          await newLeaf.openFile(targetFile);
+          this.app.workspace.setActiveLeaf(newLeaf, { focus: true });
+          // Poll for the new view to mount and the editor to be ready.
+          for (let i = 0; i < 30; i++) {
+            const view = newLeaf.view;
+            if (view instanceof TypstView) {
+              if (view.getCurrentMode() !== "source") {
+                await view.toggleMode();
+                await new Promise((r) => setTimeout(r, 100));
+              }
+              if (view.jumpToSourcePosition(line, col)) return;
+            }
+            await new Promise((r) => setTimeout(r, 50));
+          }
         },
+      );
+      console.log(
+        `[typst-perf] pdfRenderer.renderPdf: ${(performance.now() - _renderT0).toFixed(1)}ms`,
       );
       const savedScroll = this.stateManager.getSavedReadingScrollTop();
 
