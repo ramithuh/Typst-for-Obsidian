@@ -635,6 +635,63 @@ export class TypstView extends TextFileView {
     });
   }
 
+  // Pinch-to-zoom and Ctrl/Cmd+scroll-to-zoom on the PDF preview.
+  // Uses the CSS `zoom` property (Chromium-only, but Obsidian = Electron
+  // = Chromium) which scales the element AND its layout-occupying size,
+  // so the scrollbar bounds stay correct. Persists across recompiles
+  // because we reuse the same readingDiv element.
+  private attachPreviewZoom(readingDiv: HTMLElement): void {
+    const MIN_ZOOM = 0.25;
+    const MAX_ZOOM = 4;
+    const WHEEL_TO_ZOOM = 0.0035;
+    const findScroller = (): HTMLElement => {
+      let el: HTMLElement | null = readingDiv;
+      while (el) {
+        const oy = window.getComputedStyle(el).overflowY;
+        if (
+          (oy === "auto" || oy === "scroll") &&
+          el.scrollHeight > el.clientHeight + 1
+        ) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+      return readingDiv;
+    };
+
+    const getZoom = () => parseFloat(readingDiv.style.zoom || "1") || 1;
+    const setZoomAt = (newZoom: number, clientX: number, clientY: number) => {
+      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+      const oldZoom = getZoom();
+      if (Math.abs(clamped - oldZoom) < 0.001) return;
+      const ratio = clamped / oldZoom;
+
+      const scroller = findScroller();
+      const rect = scroller.getBoundingClientRect();
+      const cx = clientX - rect.left + scroller.scrollLeft;
+      const cy = clientY - rect.top + scroller.scrollTop;
+
+      readingDiv.style.zoom = String(clamped);
+
+      // Keep the point under the cursor stable after the zoom change.
+      scroller.scrollLeft = cx * ratio - (clientX - rect.left);
+      scroller.scrollTop = cy * ratio - (clientY - rect.top);
+    };
+
+    readingDiv.addEventListener(
+      "wheel",
+      (e: WheelEvent) => {
+        // Chromium dispatches trackpad pinch as a wheel event with
+        // ctrlKey set. Ctrl/Cmd + mouse-wheel is also treated as zoom.
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
+        setZoomAt(getZoom() * factor, e.clientX, e.clientY);
+      },
+      { passive: false },
+    );
+  }
+
   // Choose where a click-to-source jump should open a not-yet-open
   // file. Mirrors the user's crossFileJumpTarget setting.
   private pickCrossFileJumpTarget(): WorkspaceLeaf {
@@ -810,6 +867,7 @@ export class TypstView extends TextFileView {
       contentEl.empty();
       this.cleanupEditor();
       readingDiv = contentEl.createDiv("typst-reading-mode");
+      this.attachPreviewZoom(readingDiv);
     }
 
     try {
