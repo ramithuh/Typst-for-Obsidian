@@ -18,6 +18,7 @@ import { TemplateVariableProvider } from "./templateVariableProvider";
 import { BacklinkParser, BACKLINK_URI_PREFIX } from "./backlinkParser";
 import { MetadataIndexer } from "./metadataIndexer";
 import { GraphColoringPatch } from "./graphColoring";
+import { BibView, BIB_VIEW_TYPE } from "./bibView";
 import { PackageManager } from "./packageManager";
 import { FontManager } from "./fontManager";
 import { SnippetManager } from "./snippetManager";
@@ -175,6 +176,10 @@ export default class TypstForObsidian extends Plugin {
     addIcon("typst-file", TypstIcon);
     this.registerExtensions(["typ"], "typst-view");
     this.registerView("typst-view", (leaf) => new TypstView(leaf, this));
+    // .bib files open in a plain-text editor view (BibTeX without the
+    // heavy Monaco setup). Lets you see and edit them inside Obsidian.
+    this.registerExtensions(["bib"], BIB_VIEW_TYPE);
+    this.registerView(BIB_VIEW_TYPE, (leaf) => new BibView(leaf));
     registerCommands(this);
     this.addSettingTab(new TypstSettingTab(this.app, this));
 
