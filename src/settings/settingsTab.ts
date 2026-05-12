@@ -320,6 +320,23 @@ export class TypstSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Preview renderer")
+      .setDesc(
+        "PDF (PDFium bitmap) is the default; matches behavior of original plugin. SVG (typst-svg vector) gives native smooth pinch-zoom and selectable text but is newer and may render some complex Typst constructs differently. Switching takes effect on the next preview refresh.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("pdf", "PDF (bitmap)")
+          .addOption("svg", "SVG (vector, smooth zoom)")
+          .setValue(this.plugin.settings.previewRenderer)
+          .onChange(async (value: string) => {
+            this.plugin.settings.previewRenderer =
+              value as TypstSettings["previewRenderer"];
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Apply graph color groups to .typ files")
       .setDesc(
         "Obsidian's core graph view skips color groups for non-markdown files. This monkey-patches the graph view so user-defined color groups apply to .typ files. Requires reload to fully take effect.",

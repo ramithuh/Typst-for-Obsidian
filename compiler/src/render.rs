@@ -72,6 +72,14 @@ pub fn to_svg(document: &PagedDocument) -> String {
     typst_svg::svg(&document.pages[0])
 }
 
+// Render every page as a separate SVG. Caller is responsible for
+// laying them out in the DOM (typically one page per scroll position
+// mirroring the PDF preview). Each SVG is self-contained with its own
+// viewBox so it scales independently in the browser.
+pub fn to_svgs(document: &PagedDocument) -> Vec<String> {
+    document.pages.iter().map(|p| typst_svg::svg(p)).collect()
+}
+
 pub fn to_pdf(document: &PagedDocument) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
     let pdf_options = typst_pdf::PdfOptions::default();
 

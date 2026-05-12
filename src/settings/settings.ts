@@ -88,6 +88,9 @@ export interface TypstSettings {
   // Apply graph-view color groups to .typ files (Obsidian core skips them
   // because they're classified as attachments; we monkey-patch around it)
   enableTypstGraphColoring: boolean;
+  // Preview renderer: "pdf" (PDFium-rasterized bitmap, current default) or
+  // "svg" (typst-svg vector output, native smooth zoom in the browser).
+  previewRenderer: "pdf" | "svg";
   // When a bib-entry node is clicked in graph view, create or open the
   // corresponding paper-note .typ file in this folder (e.g. "papers"
   // means clicking `krizhevsky2014one` opens `papers/krizhevsky2014one.typ`).
@@ -125,6 +128,7 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   sourceToPreviewSyncDebounce: 120,
   autoRecompileOnDependencyChange: true,
   enableTypstGraphColoring: true,
+  previewRenderer: "pdf",
   bibNotesFolder: "papers",
   crossFileJumpTarget: "sibling-pane-or-tab",
   useObsidianTextColor: false,

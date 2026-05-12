@@ -9,6 +9,7 @@ import {
 import { TypstEditor } from "./typstEditor";
 import TypstForObsidian from "./main";
 import { PdfRenderer, PDF_RENDER_SCALE } from "./pdfRenderer";
+import { SvgRenderer } from "./svgRenderer";
 import { ViewActionBar } from "./ui/viewActionBar";
 import { EditorStateManager } from "./editorStateManager";
 import { CompilationManager, CompilationResult } from "./compilationManager";
@@ -23,6 +24,7 @@ export class TypstView extends TextFileView {
   private fileContent: string = "";
   private plugin: TypstForObsidian;
   private pdfRenderer: PdfRenderer;
+  private svgRenderer: SvgRenderer;
   private actionBar: ViewActionBar | null = null;
   private stateManager: EditorStateManager;
   private livePreviewActive: boolean = false;
@@ -51,6 +53,7 @@ export class TypstView extends TextFileView {
     }
 
     this.pdfRenderer = new PdfRenderer();
+    this.svgRenderer = new SvgRenderer();
     this.stateManager = new EditorStateManager();
     this.compilationManager = new CompilationManager(plugin);
     this.scope = new Scope(this.app.scope);
@@ -349,7 +352,7 @@ export class TypstView extends TextFileView {
     result: CompilationResult,
   ): Promise<void> {
     if (this.currentMode === "reading" && this.pairedView) {
-      await this.showReadingMode(result.pdfData);
+      await this.showReadingMode(result.data);
     }
     if (this.currentMode === "source" && this.pairedView) {
       this.clearErrors();
@@ -481,20 +484,16 @@ export class TypstView extends TextFileView {
     }
   }
 
-  private async compile(): Promise<Uint8Array | null> {
+  private async compile(): Promise<Uint8Array | string[] | null> {
     const content = this.getViewData();
     try {
       const filePath = this.file?.path || "/main.typ";
-
-      if (this.livePreviewActive && this.plugin.settings.enableLivePreview) {
-        const result = await this.plugin.compileToPdf(content, filePath);
-        this.clearErrors();
-        return result;
-      } else {
-        const result = await this.plugin.compileToPdf(content, filePath);
-        this.clearErrors();
-        return result;
-      }
+      const useSvg = this.plugin.settings.previewRenderer === "svg";
+      const result = useSvg
+        ? await this.plugin.compileToSvgs(content, filePath)
+        : await this.plugin.compileToPdf(content, filePath);
+      this.clearErrors();
+      return result;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error("Compilation error:", errorMsg);
@@ -852,7 +851,9 @@ export class TypstView extends TextFileView {
     this.stateManager.restoreEditorState(this.typstEditor);
   }
 
-  private async showReadingMode(pdfData: Uint8Array): Promise<void> {
+  private async showReadingMode(
+    compiled: Uint8Array | string[],
+  ): Promise<void> {
     const contentEl = this.getContentElement();
     if (!contentEl) return;
 
@@ -870,9 +871,102 @@ export class TypstView extends TextFileView {
       this.attachPreviewZoom(readingDiv);
     }
 
+    const onBacklink = (linkTarget: string, newTab: boolean) => {
+      if (this.file) {
+        this.app.workspace.openLinkText(
+          linkTarget,
+          this.file.path,
+          newTab ? "tab" : false,
+        );
+      }
+    };
+    const onJump = async (page: number, x: number, y: number) => {
+      const result = await this.plugin.jumpFromClick(page, x, y);
+      if (!result) return;
+      const vaultPath = result.file.replace(/^\//, "");
+      let zeroLine = result.line;
+      if (vaultPath === this.plugin.lastCompilePath) {
+        zeroLine -= this.plugin.lastCompilePrefixLines;
+      }
+      if (zeroLine < 0) return;
+      const line = zeroLine + 1;
+      const col = result.column + 1;
+
+      // 1. Paired source view
+      if (
+        this.pairedView &&
+        this.pairedView.file?.path === vaultPath &&
+        this.pairedView.jumpToSourcePosition(line, col)
+      ) {
+        this.app.workspace.setActiveLeaf(this.pairedView.leaf, {
+          focus: true,
+        });
+        return;
+      }
+      // 2. Open source-mode leaf for target
+      const leaves = this.app.workspace.getLeavesOfType("typst-view");
+      for (const leaf of leaves) {
+        const view = leaf.view;
+        if (
+          view instanceof TypstView &&
+          view !== this &&
+          view.file?.path === vaultPath &&
+          view.jumpToSourcePosition(line, col)
+        ) {
+          this.app.workspace.setActiveLeaf(leaf, { focus: true });
+          return;
+        }
+      }
+      // 3. Reading-mode leaf for target → toggle then jump
+      for (const leaf of leaves) {
+        const view = leaf.view;
+        if (
+          view instanceof TypstView &&
+          view !== this &&
+          view.file?.path === vaultPath
+        ) {
+          await view.toggleMode();
+          await new Promise((r) => setTimeout(r, 100));
+          if (view.jumpToSourcePosition(line, col)) {
+            this.app.workspace.setActiveLeaf(leaf, { focus: true });
+          }
+          return;
+        }
+      }
+      // 4. Not open anywhere — pick destination per setting
+      const targetFile = this.app.vault.getAbstractFileByPath(vaultPath);
+      if (!(targetFile instanceof TFile)) {
+        new Notice(`Could not find ${vaultPath}`, 3000);
+        return;
+      }
+      const targetLeaf = this.pickCrossFileJumpTarget();
+      await targetLeaf.openFile(targetFile);
+      this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+      for (let i = 0; i < 30; i++) {
+        const view = targetLeaf.view;
+        if (view instanceof TypstView) {
+          if (view.getCurrentMode() !== "source") {
+            await view.toggleMode();
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          if (view.jumpToSourcePosition(line, col)) return;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+
     try {
+      if (Array.isArray(compiled)) {
+        // SVG path — vector rendering, native smooth zoom.
+        this.svgRenderer.renderSvgs(
+          compiled,
+          readingDiv,
+          onBacklink,
+          onJump,
+        );
+      } else {
       await this.pdfRenderer.renderPdf(
-        pdfData,
+        compiled,
         readingDiv,
         this.plugin.settings.enableTextLayer,
         (linkTarget: string, newTab: boolean) => {
@@ -971,6 +1065,7 @@ export class TypstView extends TextFileView {
           }
         },
       );
+      } // end PDF branch
       const savedScroll = this.stateManager.getSavedReadingScrollTop();
 
       if (savedScroll > 0) {

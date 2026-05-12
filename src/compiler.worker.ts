@@ -123,6 +123,16 @@ onmessage = (ev: MessageEvent<Message>) => {
             message.data.path
           );
           postMessage(result);
+        } else if (message.data.format == "svgs") {
+          const result = compiler.compile_svgs(
+            message.data.source,
+            message.data.path
+          );
+          postMessage({
+            type: "svgsResult",
+            requestId: message.data.requestId,
+            data: result,
+          });
         } else if (message.data.format == "pdf") {
           const data: CompilePdfCommand = message.data;
           const result = compiler.compile_pdf(data.source, data.path);
@@ -133,8 +143,10 @@ onmessage = (ev: MessageEvent<Message>) => {
           });
         }
       } catch (error) {
+        const fmt = message.data?.format;
+        const replyType = fmt === "svgs" ? "svgsResult" : "pdfResult";
         postMessage({
-          type: "pdfResult",
+          type: replyType,
           requestId: message.data?.requestId,
           error: error.toString(),
         });

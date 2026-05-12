@@ -1,8 +1,14 @@
 import { Events } from "obsidian";
 import TypstForObsidian from "./main";
 
+// `data` is a Uint8Array of PDF bytes when the user's previewRenderer
+// setting is "pdf", or an array of per-page SVG strings when "svg".
+// Consumers should branch on `type` (or use the convenience pdfData
+// alias for PDF-only call sites that haven't been updated yet).
 export interface CompilationResult {
-  pdfData: Uint8Array;
+  type: "pdf" | "svg";
+  data: Uint8Array | string[];
+  pdfData?: Uint8Array; // legacy alias for PDF call sites; undefined when type === "svg"
   source: string;
   filePath: string;
 }
@@ -45,7 +51,7 @@ export class CompilationManager extends Events {
   async compileNow(
     source: string,
     filePath: string
-  ): Promise<Uint8Array | null> {
+  ): Promise<Uint8Array | string[] | null> {
     this.cancelPending();
 
     if (this.isCompiling) {
@@ -76,7 +82,7 @@ export class CompilationManager extends Events {
   private async performCompilation(
     source: string,
     filePath: string
-  ): Promise<Uint8Array | null> {
+  ): Promise<Uint8Array | string[] | null> {
     if (this.isCompiling) {
       return null;
     }
@@ -85,16 +91,21 @@ export class CompilationManager extends Events {
     this.trigger("compilation-start", { source, filePath });
 
     try {
-      const pdfData = await this.plugin.compileToPdf(source, filePath);
+      const useSvg = this.plugin.settings.previewRenderer === "svg";
+      const data = useSvg
+        ? await this.plugin.compileToSvgs(source, filePath)
+        : await this.plugin.compileToPdf(source, filePath);
 
       const result: CompilationResult = {
-        pdfData,
+        type: useSvg ? "svg" : "pdf",
+        data,
+        pdfData: useSvg ? undefined : (data as Uint8Array),
         source,
         filePath,
       };
 
       this.trigger("compilation-complete", result);
-      return pdfData;
+      return data;
     } catch (error) {
       this.trigger("compilation-error", error);
       return null;

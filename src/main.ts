@@ -458,6 +458,84 @@ export default class TypstForObsidian extends Plugin {
     }
   }
 
+  // Parallel to compileToPdf but returns a string per page from
+  // typst-svg. Used by the SVG preview renderer path.
+  async compileToSvgs(
+    source: string,
+    path: string = "/main.typ",
+  ): Promise<string[]> {
+    let prefix = "";
+    if (this.settings.useDefaultLayoutFunctions) {
+      prefix = this.settings.customLayoutFunctions;
+    } else {
+      prefix = "#set page(margin: (x: 0.25em, y: 0.25em))";
+    }
+    let finalSource = prefix + "\n" + source;
+    this.lastCompilePrefixLines = (prefix.match(/\n/g)?.length ?? 0) + 1;
+    this.lastCompilePath = path;
+    finalSource = finalSource + "\n#linebreak()\n#linebreak()";
+    finalSource = this.templateProvider.replaceVariables(finalSource);
+    finalSource = this.backlinkParser.replaceBacklinks(finalSource, path);
+
+    const requestId = ++this.nextCompileRequestId;
+    const message = {
+      type: "compile",
+      data: {
+        format: "svgs",
+        path,
+        source: finalSource,
+        requestId,
+      },
+    };
+
+    this.compilerWorker.postMessage(message);
+
+    while (true) {
+      const result = await new Promise<any>((resolve, reject) => {
+        const listener = (ev: MessageEvent) => {
+          if (!ev.data) return;
+          if (ev.data.type === "ready") return;
+          if (ev.data.buffer && ev.data.path) {
+            remove();
+            resolve(ev.data);
+            return;
+          }
+          if (
+            ev.data.type === "svgsResult" &&
+            ev.data.requestId === requestId
+          ) {
+            remove();
+            resolve(ev.data);
+          }
+        };
+        const errorListener = (error: ErrorEvent) => {
+          console.error("Worker error during SVG compile:", error);
+          remove();
+          reject(error);
+        };
+        const remove = () => {
+          this.compilerWorker.removeEventListener("message", listener);
+          this.compilerWorker.removeEventListener("error", errorListener);
+        };
+        this.compilerWorker.addEventListener("message", listener);
+        this.compilerWorker.addEventListener("error", errorListener);
+      });
+
+      if (result && result.type === "svgsResult") {
+        if (result.error) throw new Error(result.error);
+        return result.data as string[];
+      } else if (result && result.error) {
+        throw new Error(result.error);
+      } else if (result && result.buffer && result.path) {
+        await this.handleWorkerRequest(result);
+        continue;
+      } else {
+        console.error("Unexpected SVG response format:", result);
+        throw new Error("Invalid SVG response format");
+      }
+    }
+  }
+
   // Resolve a click in the rendered PDF preview back to its source
   // location, using the WASM compiler's stored last document.
   // Returns null if no span was found under the click.

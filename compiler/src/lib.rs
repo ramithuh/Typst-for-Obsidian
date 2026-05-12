@@ -72,6 +72,18 @@ impl Compiler {
         Ok(svg)
     }
 
+    // Compile and return one SVG string per page, joined with a sentinel
+    // separator. Caller splits on it. We use a multi-string return via
+    // JSON-encoded array because wasm_bindgen's Vec<String> support is
+    // less ergonomic than passing a single String the JS side parses.
+    pub fn compile_svgs(&mut self, text: String, path: String) -> Result<JsValue, JsValue> {
+        let document = self.world.compile(text, path)?;
+        let svgs = render::to_svgs(&document);
+        self.last_doc = Some(document);
+        serde_wasm_bindgen::to_value(&svgs)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     pub fn compile_pdf(&mut self, text: String, path: String) -> Result<Vec<u8>, JsValue> {
         let document = self.world.compile(text, path)?;
         let pdf = render::to_pdf(&document)?;
