@@ -634,15 +634,20 @@ export class TypstView extends TextFileView {
     });
   }
 
-  // Pinch-to-zoom and Ctrl/Cmd+scroll-to-zoom on the PDF preview.
+  // Pinch-to-zoom and Ctrl/Cmd+scroll-to-zoom on the preview pane.
   // Uses the CSS `zoom` property (Chromium-only, but Obsidian = Electron
   // = Chromium) which scales the element AND its layout-occupying size,
-  // so the scrollbar bounds stay correct. Persists across recompiles
-  // because we reuse the same readingDiv element.
+  // so the scrollbar bounds stay correct.
+  //
+  // Pinch gestures fire many wheel events per frame; we coalesce them
+  // via requestAnimationFrame so each repaint applies the accumulated
+  // delta in one shot. Combined with `will-change: zoom`, this keeps
+  // the gesture fluid even on big SVG previews.
   private attachPreviewZoom(readingDiv: HTMLElement): void {
     const MIN_ZOOM = 0.25;
     const MAX_ZOOM = 4;
     const WHEEL_TO_ZOOM = 0.0035;
+    readingDiv.style.willChange = "zoom";
     const findScroller = (): HTMLElement => {
       let el: HTMLElement | null = readingDiv;
       while (el) {
@@ -659,33 +664,44 @@ export class TypstView extends TextFileView {
     };
 
     const getZoom = () => parseFloat(readingDiv.style.zoom || "1") || 1;
-    const setZoomAt = (newZoom: number, clientX: number, clientY: number) => {
+    const applyZoom = (newZoom: number, clientX: number, clientY: number) => {
       const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
       const oldZoom = getZoom();
       if (Math.abs(clamped - oldZoom) < 0.001) return;
       const ratio = clamped / oldZoom;
-
       const scroller = findScroller();
       const rect = scroller.getBoundingClientRect();
       const cx = clientX - rect.left + scroller.scrollLeft;
       const cy = clientY - rect.top + scroller.scrollTop;
-
       readingDiv.style.zoom = String(clamped);
-
-      // Keep the point under the cursor stable after the zoom change.
       scroller.scrollLeft = cx * ratio - (clientX - rect.left);
       scroller.scrollTop = cy * ratio - (clientY - rect.top);
+    };
+
+    // rAF throttle: many wheel events per gesture coalesce into one
+    // zoom apply per repaint. Hugely reduces reflow + paint cost.
+    let pendingZoom: number | null = null;
+    let pendingX = 0;
+    let pendingY = 0;
+    let rafId = 0;
+    const flush = () => {
+      rafId = 0;
+      if (pendingZoom == null) return;
+      applyZoom(pendingZoom, pendingX, pendingY);
+      pendingZoom = null;
     };
 
     readingDiv.addEventListener(
       "wheel",
       (e: WheelEvent) => {
-        // Chromium dispatches trackpad pinch as a wheel event with
-        // ctrlKey set. Ctrl/Cmd + mouse-wheel is also treated as zoom.
         if (!e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
+        const base = pendingZoom ?? getZoom();
         const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
-        setZoomAt(getZoom() * factor, e.clientX, e.clientY);
+        pendingZoom = base * factor;
+        pendingX = e.clientX;
+        pendingY = e.clientY;
+        if (!rafId) rafId = requestAnimationFrame(flush);
       },
       { passive: false },
     );
