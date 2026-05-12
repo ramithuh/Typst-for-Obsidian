@@ -635,19 +635,39 @@ export class TypstView extends TextFileView {
   }
 
   // Pinch-to-zoom and Ctrl/Cmd+scroll-to-zoom on the preview pane.
-  // Uses the CSS `zoom` property (Chromium-only, but Obsidian = Electron
-  // = Chromium) which scales the element AND its layout-occupying size,
-  // so the scrollbar bounds stay correct.
   //
-  // Pinch gestures fire many wheel events per frame; we coalesce them
-  // via requestAnimationFrame so each repaint applies the accumulated
-  // delta in one shot. Combined with `will-change: zoom`, this keeps
-  // the gesture fluid even on big SVG previews.
+  // CSS `transform: scale()` on an inner wrapper is GPU-composited —
+  // no reflow on each frame, which is what makes it as smooth as
+  // Safari's native PDF zoom. We pair it with an outer wrapper sized
+  // to (naturalContent × zoom) so the scroll-bar bounds stay correct.
+  //
+  // Layout:
+  //   readingDiv (outer; explicit width/height = naturalContent × z)
+  //     └── zoomInner (transform: scale(z); transform-origin: 0 0)
+  //         └── per-page divs (rendered by PdfRenderer / SvgRenderer)
+  //
+  // Pinch gestures fire many wheel events per frame; we coalesce via
+  // requestAnimationFrame so each repaint applies the accumulated
+  // delta in one shot.
   private attachPreviewZoom(readingDiv: HTMLElement): void {
     const MIN_ZOOM = 0.25;
     const MAX_ZOOM = 4;
     const WHEEL_TO_ZOOM = 0.0035;
-    readingDiv.style.willChange = "zoom";
+
+    const zoomInner = this.ensureZoomInner(readingDiv);
+    zoomInner.style.transformOrigin = "0 0";
+    zoomInner.style.willChange = "transform";
+
+    let currentZoom = 1;
+    let naturalW = 0;
+    let naturalH = 0;
+    const measureNatural = () => {
+      // zoomInner has no explicit size set, so scrollWidth/Height is
+      // the content's natural layout size regardless of transform.
+      naturalW = zoomInner.scrollWidth;
+      naturalH = zoomInner.scrollHeight;
+    };
+
     const findScroller = (): HTMLElement => {
       let el: HTMLElement | null = readingDiv;
       while (el) {
@@ -663,23 +683,44 @@ export class TypstView extends TextFileView {
       return readingDiv;
     };
 
-    const getZoom = () => parseFloat(readingDiv.style.zoom || "1") || 1;
     const applyZoom = (newZoom: number, clientX: number, clientY: number) => {
       const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
-      const oldZoom = getZoom();
-      if (Math.abs(clamped - oldZoom) < 0.001) return;
-      const ratio = clamped / oldZoom;
+      if (Math.abs(clamped - currentZoom) < 0.001) return;
+      if (!naturalW || !naturalH) measureNatural();
+      if (!naturalW || !naturalH) return;
+      const ratio = clamped / currentZoom;
+
       const scroller = findScroller();
       const rect = scroller.getBoundingClientRect();
       const cx = clientX - rect.left + scroller.scrollLeft;
       const cy = clientY - rect.top + scroller.scrollTop;
-      readingDiv.style.zoom = String(clamped);
+
+      currentZoom = clamped;
+      zoomInner.style.transform = `scale(${clamped})`;
+      readingDiv.style.width = naturalW * clamped + "px";
+      readingDiv.style.height = naturalH * clamped + "px";
+
       scroller.scrollLeft = cx * ratio - (clientX - rect.left);
       scroller.scrollTop = cy * ratio - (clientY - rect.top);
     };
 
-    // rAF throttle: many wheel events per gesture coalesce into one
-    // zoom apply per repaint. Hugely reduces reflow + paint cost.
+    // Re-measure naturals whenever content changes. We observe the
+    // zoomInner subtree so that recompiles (which insert/replace
+    // per-page divs) get the new natural dimensions automatically.
+    const mo = new MutationObserver(() => {
+      // Defer: let DOM settle before reading scrollWidth/Height.
+      requestAnimationFrame(() => {
+        measureNatural();
+        // Keep readingDiv sized to current zoom × new natural.
+        if (naturalW && naturalH) {
+          readingDiv.style.width = naturalW * currentZoom + "px";
+          readingDiv.style.height = naturalH * currentZoom + "px";
+        }
+      });
+    });
+    mo.observe(zoomInner, { childList: true, subtree: true });
+
+    // rAF-coalesced wheel handler.
     let pendingZoom: number | null = null;
     let pendingX = 0;
     let pendingY = 0;
@@ -696,7 +737,7 @@ export class TypstView extends TextFileView {
       (e: WheelEvent) => {
         if (!e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
-        const base = pendingZoom ?? getZoom();
+        const base = pendingZoom ?? currentZoom;
         const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
         pendingZoom = base * factor;
         pendingX = e.clientX;
@@ -705,6 +746,26 @@ export class TypstView extends TextFileView {
       },
       { passive: false },
     );
+  }
+
+  // Ensure a `.typst-zoom-inner` child exists inside readingDiv and
+  // that any pre-existing per-page divs are moved into it. The
+  // renderers target this inner element so transform-based zoom can
+  // apply cleanly without affecting readingDiv's layout box.
+  private ensureZoomInner(readingDiv: HTMLElement): HTMLElement {
+    let inner = readingDiv.querySelector(
+      ":scope > .typst-zoom-inner",
+    ) as HTMLElement | null;
+    if (inner) return inner;
+    inner = document.createElement("div");
+    inner.classList.add("typst-zoom-inner");
+    // Move any existing page children into the new inner wrapper.
+    const existing = Array.from(
+      readingDiv.querySelectorAll(":scope > .typst-pdf-page"),
+    );
+    for (const child of existing) inner.appendChild(child);
+    readingDiv.appendChild(inner);
+    return inner;
   }
 
   // Choose where a click-to-source jump should open a not-yet-open
@@ -886,6 +947,10 @@ export class TypstView extends TextFileView {
       readingDiv = contentEl.createDiv("typst-reading-mode");
       this.attachPreviewZoom(readingDiv);
     }
+    // Renderers insert per-page divs as children of the zoom-inner
+    // wrapper. attachPreviewZoom (called on first creation) ensured
+    // the wrapper exists; ensureZoomInner is idempotent on reuse.
+    const renderTarget = this.ensureZoomInner(readingDiv);
 
     const onBacklink = (linkTarget: string, newTab: boolean) => {
       if (this.file) {
@@ -976,14 +1041,14 @@ export class TypstView extends TextFileView {
         // SVG path — vector rendering, native smooth zoom.
         this.svgRenderer.renderSvgs(
           compiled,
-          readingDiv,
+          renderTarget,
           onBacklink,
           onJump,
         );
       } else {
       await this.pdfRenderer.renderPdf(
         compiled,
-        readingDiv,
+        renderTarget,
         this.plugin.settings.enableTextLayer,
         (linkTarget: string, newTab: boolean) => {
           if (this.file) {
