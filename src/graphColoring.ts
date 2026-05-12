@@ -21,7 +21,6 @@ interface ColorGroup {
 
 const SENTINEL_QUERY = "_typstGraphPatched";
 const SENTINEL_RENDERER = "_typstGraphRendererPatched";
-const SENTINEL_CLICK = "_typstGraphClickPatched";
 const TARGET_EXT = "typ";
 
 export class GraphColoringPatch {
@@ -77,40 +76,6 @@ export class GraphColoringPatch {
     // repeatedly on the same leaf or on fresh leaves from re-opens.
     this.patchSearchQueries(eng);
     this.patchRenderer(renderer, eng);
-    this.patchNodeClick(renderer);
-  }
-
-  // Intercept clicks on bib-entry nodes. Obsidian's default action is
-  // "create a new .md file named after the link," which is wrong for
-  // citation keys — they belong as .typ notes in the user's chosen
-  // bibNotesFolder. Falls through to the original click handler for
-  // any node that isn't a known bib key.
-  private patchNodeClick(renderer: any): void {
-    if ((renderer as any)[SENTINEL_CLICK]) return;
-    if (typeof renderer.onNodeClick !== "function") return;
-    (renderer as any)[SENTINEL_CLICK] = true;
-    const plugin = this.plugin as any;
-    const origOnNodeClick = renderer.onNodeClick.bind(renderer);
-
-    renderer.onNodeClick = function (event: any, nodeId: any, ...rest: any[]) {
-      // nodeId could be the second arg or the first depending on
-      // Obsidian's internal signature; check both.
-      const id = typeof nodeId === "string" ? nodeId : event;
-      try {
-        const indexer = plugin.metadataIndexer;
-        if (
-          indexer?.bibKeyToPath &&
-          typeof id === "string" &&
-          indexer.bibKeyToPath.has(id)
-        ) {
-          void openOrCreateBibNote(plugin, id);
-          return;
-        }
-      } catch (e) {
-        console.error("[typst-graph-color] bib-node click failed:", e);
-      }
-      return origOnNodeClick(event, nodeId, ...rest);
-    };
   }
 
   // Wrap each searchQuery's `match()` so it falls back to matchFilepath
@@ -150,8 +115,49 @@ export class GraphColoringPatch {
     (renderer as any)[SENTINEL_RENDERER] = true;
     const origSetData = renderer.setData.bind(renderer);
     const self = this;
+    const plugin = this.plugin as any;
+
+    // Build a stable click wrapper. We keep a reference to whatever
+    // function Obsidian currently uses as `onNodeClick` so we can
+    // forward to it; Obsidian may reset onNodeClick (e.g., re-bind
+    // on certain transitions), so the setData wrapper below also
+    // re-installs us if it sees the property has changed back.
+    let lastNativeClick: (
+      event: any,
+      nodeId: any,
+      nodeType: any,
+    ) => any = renderer.onNodeClick?.bind(renderer);
+    const ourClickWrapper = function (
+      this: any,
+      event: any,
+      nodeId: any,
+      nodeType: any,
+    ) {
+      try {
+        const indexer = plugin.metadataIndexer;
+        if (
+          indexer?.bibKeyToPath &&
+          typeof nodeId === "string" &&
+          indexer.bibKeyToPath.has(nodeId)
+        ) {
+          void openOrCreateBibNote(plugin, nodeId);
+          return;
+        }
+      } catch (e) {
+        console.error("[typst-graph-color] bib-node click failed:", e);
+      }
+      return lastNativeClick.call(this, event, nodeId, nodeType);
+    };
+    renderer.onNodeClick = ourClickWrapper;
 
     renderer.setData = function (data: any) {
+      // Defensive: if Obsidian has reset onNodeClick (e.g., by re-
+      // binding it during some internal transition), capture the new
+      // version as the fallback and re-install our wrapper.
+      if (renderer.onNodeClick !== ourClickWrapper) {
+        lastNativeClick = renderer.onNodeClick.bind(renderer);
+        renderer.onNodeClick = ourClickWrapper;
+      }
       try {
         self.injectAttachmentColors(data, eng);
       } catch (e) {
