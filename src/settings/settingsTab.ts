@@ -320,6 +320,20 @@ export class TypstSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Apply graph color groups to .typ files")
+      .setDesc(
+        "Obsidian's core graph view skips color groups for non-markdown files. This monkey-patches the graph view so user-defined color groups apply to .typ files. Requires reload to fully take effect.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableTypstGraphColoring)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableTypstGraphColoring = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Sync preview to editor cursor")
       .setDesc(
         "As you move the cursor in the editor, scroll the preview pane to the corresponding rendered location.",

@@ -85,6 +85,9 @@ export interface TypstSettings {
   sourceToPreviewSyncDebounce: number;
   // Auto-recompile open previews when any .typ file in the vault changes
   autoRecompileOnDependencyChange: boolean;
+  // Apply graph-view color groups to .typ files (Obsidian core skips them
+  // because they're classified as attachments; we monkey-patch around it)
+  enableTypstGraphColoring: boolean;
   // Where a click-to-source jump lands when the target file isn't open yet
   crossFileJumpTarget:
     | "sibling-pane-or-tab"
@@ -117,6 +120,7 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   enableSourceToPreviewSync: true,
   sourceToPreviewSyncDebounce: 120,
   autoRecompileOnDependencyChange: true,
+  enableTypstGraphColoring: true,
   crossFileJumpTarget: "sibling-pane-or-tab",
   useObsidianTextColor: false,
   useObsidianMonospaceFont: true,

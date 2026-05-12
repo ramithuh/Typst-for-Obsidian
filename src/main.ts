@@ -17,6 +17,7 @@ import { TypstSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import { TemplateVariableProvider } from "./templateVariableProvider";
 import { BacklinkParser, BACKLINK_URI_PREFIX } from "./backlinkParser";
 import { MetadataIndexer } from "./metadataIndexer";
+import { GraphColoringPatch } from "./graphColoring";
 import { PackageManager } from "./packageManager";
 import { FontManager } from "./fontManager";
 import { SnippetManager } from "./snippetManager";
@@ -37,6 +38,7 @@ export default class TypstForObsidian extends Plugin {
   templateProvider: TemplateVariableProvider;
   backlinkParser: BacklinkParser;
   metadataIndexer: MetadataIndexer;
+  graphColoringPatch: GraphColoringPatch;
   packageManager: PackageManager;
   fontManager: FontManager;
   snippetManager: SnippetManager;
@@ -66,6 +68,14 @@ export default class TypstForObsidian extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.metadataIndexer.indexAll();
     });
+
+    // Monkey-patch Obsidian's graph view so color groups also apply to
+    // .typ files (Obsidian core treats them as attachments and skips
+    // group queries — see graphColoring.ts).
+    if (this.settings.enableTypstGraphColoring) {
+      this.graphColoringPatch = new GraphColoringPatch(this);
+      this.graphColoringPatch.register();
+    }
 
     // Tell the WASM compiler to drop its cached source whenever a .typ
     // file in the vault changes, so the next compile re-reads it.
