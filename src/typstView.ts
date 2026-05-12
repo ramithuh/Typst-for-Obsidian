@@ -636,40 +636,51 @@ export class TypstView extends TextFileView {
 
   // Pinch-to-zoom and Ctrl/Cmd+scroll-to-zoom on the preview pane.
   //
-  // CSS `transform: scale()` on an inner wrapper is GPU-composited —
-  // no reflow on each frame, which is what makes it as smooth as
-  // Safari's native PDF zoom. We pair it with an outer wrapper sized
-  // to (naturalContent × zoom) so the scroll-bar bounds stay correct.
+  // The trick to making this feel like Safari's native PDF zoom is to
+  // *not* touch any layout properties during the gesture. During the
+  // pinch we only update an inner wrapper's `transform: translate(tx,
+  // ty) scale(z)`, which the browser composites on the GPU with zero
+  // reflow. readingDiv's CSS width/height stays untouched (so the
+  // scrollbar doesn't jiggle), and the scroller's scrollTop/Left
+  // stays untouched (so the scroll thumb doesn't move).
+  //
+  // Only ~150ms after the gesture finishes (no wheel event has fired
+  // in that window) do we *commit*: set readingDiv's dimensions to
+  // the final natural × scale, reset the transform back to pure
+  // scale (no translate), and adjust the scroller's scroll position
+  // so the visible content stays exactly where the user left it.
   //
   // Layout:
-  //   readingDiv (outer; explicit width/height = naturalContent × z)
-  //     └── zoomInner (transform: scale(z); transform-origin: 0 0)
+  //   readingDiv (outer; explicit width/height after commit)
+  //     └── zoomInner (transform: translate(tx, ty) scale(z))
   //         └── per-page divs (rendered by PdfRenderer / SvgRenderer)
-  //
-  // Pinch gestures fire many wheel events per frame; we coalesce via
-  // requestAnimationFrame so each repaint applies the accumulated
-  // delta in one shot.
   private attachPreviewZoom(readingDiv: HTMLElement): void {
     const MIN_ZOOM = 0.25;
     const MAX_ZOOM = 4;
     const WHEEL_TO_ZOOM = 0.0035;
+    const COMMIT_DELAY_MS = 150;
 
     const zoomInner = this.ensureZoomInner(readingDiv);
     zoomInner.style.transformOrigin = "0 0";
     zoomInner.style.willChange = "transform";
-    // Strip readingDiv's padding/margin so zoomInner sits at (0,0).
-    // Otherwise CSS file-margins padding offsets the transform
-    // origin from the scroll-content frame and cursor-centered zoom
-    // ends up off by paddingLeft × (zoom - 1) on each axis.
+    // Visual padding around the page content lives on zoomInner so it
+    // sits *inside* the transformed coordinate frame. The cursor math
+    // automatically handles it (padding is just part of zoomInner's
+    // local space). Padding scales with zoom — fine for our use case.
+    zoomInner.style.padding = "24px 24px 24px 24px";
+    zoomInner.style.boxSizing = "border-box";
+    // Strip readingDiv's padding/margin so zoomInner sits at (0,0)
+    // of readingDiv (the scroll-content frame's origin).
     readingDiv.style.padding = "0";
     readingDiv.style.margin = "0";
 
-    let currentZoom = 1;
+    let committedScale = 1;
+    let pendingScale = 1;
+    let pendingTx = 0;
+    let pendingTy = 0;
     let naturalW = 0;
     let naturalH = 0;
     const measureNatural = () => {
-      // zoomInner has no explicit size set, so scrollWidth/Height is
-      // the content's natural layout size regardless of transform.
       naturalW = zoomInner.scrollWidth;
       naturalH = zoomInner.scrollHeight;
     };
@@ -689,66 +700,81 @@ export class TypstView extends TextFileView {
       return readingDiv;
     };
 
-    const applyZoom = (newZoom: number, clientX: number, clientY: number) => {
-      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
-      if (Math.abs(clamped - currentZoom) < 0.001) return;
-      if (!naturalW || !naturalH) measureNatural();
-      if (!naturalW || !naturalH) return;
-      const ratio = clamped / currentZoom;
-
-      const scroller = findScroller();
-      const rect = scroller.getBoundingClientRect();
-      const cx = clientX - rect.left + scroller.scrollLeft;
-      const cy = clientY - rect.top + scroller.scrollTop;
-
-      currentZoom = clamped;
-      zoomInner.style.transform = `scale(${clamped})`;
-      readingDiv.style.width = naturalW * clamped + "px";
-      readingDiv.style.height = naturalH * clamped + "px";
-
-      scroller.scrollLeft = cx * ratio - (clientX - rect.left);
-      scroller.scrollTop = cy * ratio - (clientY - rect.top);
+    const applyTransform = () => {
+      zoomInner.style.transform = `translate(${pendingTx}px, ${pendingTy}px) scale(${pendingScale})`;
     };
 
-    // Re-measure naturals whenever content changes. We observe the
-    // zoomInner subtree so that recompiles (which insert/replace
-    // per-page divs) get the new natural dimensions automatically.
+    const stepZoom = (newScale: number, clientX: number, clientY: number) => {
+      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newScale));
+      // World point (in zoomInner-local coordinates) currently under
+      // the cursor. We solve for newTx/newTy so that this same world
+      // point lands under the cursor again at the new scale.
+      const worldX = (clientX - pendingTx) / pendingScale;
+      const worldY = (clientY - pendingTy) / pendingScale;
+      pendingScale = clamped;
+      pendingTx = clientX - worldX * clamped;
+      pendingTy = clientY - worldY * clamped;
+      applyTransform();
+    };
+
+    let commitTimer: number | null = null;
+    const scheduleCommit = () => {
+      if (commitTimer != null) window.clearTimeout(commitTimer);
+      commitTimer = window.setTimeout(commit, COMMIT_DELAY_MS);
+    };
+
+    // Convert the live transform state into a clean (no-translate)
+    // scale + scroll position. Algebra:
+    //   Pre-commit, content at zoomInner-local (lx, ly) is visible at
+    //     viewport_x = -scrollLeft_before + pendingTx + lx*pendingScale.
+    //   Post-commit (transform = scale, no translate, scroll = newSL):
+    //     viewport_x = -newSL + lx*pendingScale.
+    //   Continuity ⇒ newSL = scrollLeft_before - pendingTx.
+    const commit = () => {
+      commitTimer = null;
+      if (!naturalW || !naturalH) measureNatural();
+      if (!naturalW || !naturalH) return;
+      if (pendingTx === 0 && pendingTy === 0 && pendingScale === committedScale) return;
+
+      const scroller = findScroller();
+      const newScrollLeft = scroller.scrollLeft - pendingTx;
+      const newScrollTop = scroller.scrollTop - pendingTy;
+
+      readingDiv.style.width = naturalW * pendingScale + "px";
+      readingDiv.style.height = naturalH * pendingScale + "px";
+      pendingTx = 0;
+      pendingTy = 0;
+      zoomInner.style.transform = `scale(${pendingScale})`;
+      // Set scroll AFTER dimensions, otherwise the new scroll values
+      // might be clipped to the old (smaller) scroll bounds.
+      scroller.scrollLeft = newScrollLeft;
+      scroller.scrollTop = newScrollTop;
+      committedScale = pendingScale;
+    };
+
+    // Re-measure naturals on content change. If a recompile happens
+    // outside a gesture, also rewrite readingDiv dimensions so the
+    // scrollbar stays in sync.
     const mo = new MutationObserver(() => {
-      // Defer: let DOM settle before reading scrollWidth/Height.
       requestAnimationFrame(() => {
         measureNatural();
-        // Keep readingDiv sized to current zoom × new natural.
-        if (naturalW && naturalH) {
-          readingDiv.style.width = naturalW * currentZoom + "px";
-          readingDiv.style.height = naturalH * currentZoom + "px";
+        if (!naturalW || !naturalH) return;
+        if (pendingTx === 0 && pendingTy === 0) {
+          readingDiv.style.width = naturalW * committedScale + "px";
+          readingDiv.style.height = naturalH * committedScale + "px";
         }
       });
     });
     mo.observe(zoomInner, { childList: true, subtree: true });
-
-    // rAF-coalesced wheel handler.
-    let pendingZoom: number | null = null;
-    let pendingX = 0;
-    let pendingY = 0;
-    let rafId = 0;
-    const flush = () => {
-      rafId = 0;
-      if (pendingZoom == null) return;
-      applyZoom(pendingZoom, pendingX, pendingY);
-      pendingZoom = null;
-    };
 
     readingDiv.addEventListener(
       "wheel",
       (e: WheelEvent) => {
         if (!e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
-        const base = pendingZoom ?? currentZoom;
         const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
-        pendingZoom = base * factor;
-        pendingX = e.clientX;
-        pendingY = e.clientY;
-        if (!rafId) rafId = requestAnimationFrame(flush);
+        stepZoom(pendingScale * factor, e.clientX, e.clientY);
+        scheduleCommit();
       },
       { passive: false },
     );
