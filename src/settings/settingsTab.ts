@@ -334,6 +334,21 @@ export class TypstSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Bib notes folder")
+      .setDesc(
+        "When you click a bib-entry node in graph view, the plugin opens or creates a .typ note for that entry inside this folder (e.g. \"papers\"/krizhevsky2014one.typ).",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("papers")
+          .setValue(this.plugin.settings.bibNotesFolder)
+          .onChange(async (value: string) => {
+            this.plugin.settings.bibNotesFolder = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Sync preview to editor cursor")
       .setDesc(
         "As you move the cursor in the editor, scroll the preview pane to the corresponding rendered location.",

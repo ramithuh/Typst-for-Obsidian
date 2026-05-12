@@ -88,6 +88,10 @@ export interface TypstSettings {
   // Apply graph-view color groups to .typ files (Obsidian core skips them
   // because they're classified as attachments; we monkey-patch around it)
   enableTypstGraphColoring: boolean;
+  // When a bib-entry node is clicked in graph view, create or open the
+  // corresponding paper-note .typ file in this folder (e.g. "papers"
+  // means clicking `krizhevsky2014one` opens `papers/krizhevsky2014one.typ`).
+  bibNotesFolder: string;
   // Where a click-to-source jump lands when the target file isn't open yet
   crossFileJumpTarget:
     | "sibling-pane-or-tab"
@@ -121,6 +125,7 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   sourceToPreviewSyncDebounce: 120,
   autoRecompileOnDependencyChange: true,
   enableTypstGraphColoring: true,
+  bibNotesFolder: "papers",
   crossFileJumpTarget: "sibling-pane-or-tab",
   useObsidianTextColor: false,
   useObsidianMonospaceFont: true,

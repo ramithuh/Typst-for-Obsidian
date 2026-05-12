@@ -21,6 +21,7 @@ interface ColorGroup {
 
 const SENTINEL_QUERY = "_typstGraphPatched";
 const SENTINEL_RENDERER = "_typstGraphRendererPatched";
+const SENTINEL_CLICK = "_typstGraphClickPatched";
 const TARGET_EXT = "typ";
 
 export class GraphColoringPatch {
@@ -76,6 +77,40 @@ export class GraphColoringPatch {
     // repeatedly on the same leaf or on fresh leaves from re-opens.
     this.patchSearchQueries(eng);
     this.patchRenderer(renderer, eng);
+    this.patchNodeClick(renderer);
+  }
+
+  // Intercept clicks on bib-entry nodes. Obsidian's default action is
+  // "create a new .md file named after the link," which is wrong for
+  // citation keys — they belong as .typ notes in the user's chosen
+  // bibNotesFolder. Falls through to the original click handler for
+  // any node that isn't a known bib key.
+  private patchNodeClick(renderer: any): void {
+    if ((renderer as any)[SENTINEL_CLICK]) return;
+    if (typeof renderer.onNodeClick !== "function") return;
+    (renderer as any)[SENTINEL_CLICK] = true;
+    const plugin = this.plugin as any;
+    const origOnNodeClick = renderer.onNodeClick.bind(renderer);
+
+    renderer.onNodeClick = function (event: any, nodeId: any, ...rest: any[]) {
+      // nodeId could be the second arg or the first depending on
+      // Obsidian's internal signature; check both.
+      const id = typeof nodeId === "string" ? nodeId : event;
+      try {
+        const indexer = plugin.metadataIndexer;
+        if (
+          indexer?.bibKeyToPath &&
+          typeof id === "string" &&
+          indexer.bibKeyToPath.has(id)
+        ) {
+          void openOrCreateBibNote(plugin, id);
+          return;
+        }
+      } catch (e) {
+        console.error("[typst-graph-color] bib-node click failed:", e);
+      }
+      return origOnNodeClick(event, nodeId, ...rest);
+    };
   }
 
   // Wrap each searchQuery's `match()` so it falls back to matchFilepath
@@ -177,5 +212,35 @@ export class GraphColoringPatch {
       }
     }
     return null;
+  }
+}
+
+// Open or create a paper-note .typ for a citation key. Idempotent: if
+// the file already exists it just opens it; otherwise it creates the
+// file (and any missing parent folders) with a minimal seed body.
+async function openOrCreateBibNote(plugin: any, key: string): Promise<void> {
+  const folder: string = (plugin.settings?.bibNotesFolder || "papers").trim();
+  const dir = folder.replace(/^\/+|\/+$/g, "");
+  const path = dir ? `${dir}/${key}.typ` : `${key}.typ`;
+  const vault = plugin.app.vault;
+  let file = vault.getAbstractFileByPath(path);
+  if (!file) {
+    if (dir && !vault.getAbstractFileByPath(dir)) {
+      try {
+        await vault.createFolder(dir);
+      } catch {
+        // Race: another path created it. Ignore.
+      }
+    }
+    const seed = `= ${key}\n\nNotes on the @${key} reference.\n`;
+    try {
+      file = await vault.create(path, seed);
+    } catch (e) {
+      console.error("[typst-graph-color] could not create bib note:", path, e);
+      return;
+    }
+  }
+  if (file && (file as any).path) {
+    await plugin.app.workspace.getLeaf().openFile(file);
   }
 }
