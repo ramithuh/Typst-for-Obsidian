@@ -657,6 +657,12 @@ export class TypstView extends TextFileView {
     const zoomInner = this.ensureZoomInner(readingDiv);
     zoomInner.style.transformOrigin = "0 0";
     zoomInner.style.willChange = "transform";
+    // Strip readingDiv's padding/margin so zoomInner sits at (0,0).
+    // Otherwise CSS file-margins padding offsets the transform
+    // origin from the scroll-content frame and cursor-centered zoom
+    // ends up off by paddingLeft × (zoom - 1) on each axis.
+    readingDiv.style.padding = "0";
+    readingDiv.style.margin = "0";
 
     let currentZoom = 1;
     let naturalW = 0;
