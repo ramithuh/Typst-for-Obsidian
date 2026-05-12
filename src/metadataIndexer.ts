@@ -23,28 +23,19 @@ export class MetadataIndexer {
   register(): void {
     const { vault } = this.plugin.app;
 
-    this.plugin.registerEvent(
-      vault.on("modify", async (file) => {
-        if (!(file instanceof TFile)) return;
-        if (file.extension === "bib") {
-          await this.rebuildBibIndex();
-          await this.reindexAllTyp();
-        } else if (file.extension === "typ") {
-          await this.indexFile(file);
-        }
-      }),
-    );
-    this.plugin.registerEvent(
-      vault.on("create", async (file) => {
-        if (!(file instanceof TFile)) return;
-        if (file.extension === "bib") {
-          await this.rebuildBibIndex();
-          await this.reindexAllTyp();
-        } else if (file.extension === "typ") {
-          await this.indexFile(file);
-        }
-      }),
-    );
+    const onTouch = async (file: TAbstractFile) => {
+      if (!(file instanceof TFile)) return;
+      if (file.extension === "bib") {
+        await this.rebuildBibIndex();
+        await this.indexFile(file);
+        await this.reindexAllTyp();
+      } else if (file.extension === "typ") {
+        await this.indexFile(file);
+      }
+    };
+
+    this.plugin.registerEvent(vault.on("modify", onTouch));
+    this.plugin.registerEvent(vault.on("create", onTouch));
     this.plugin.registerEvent(
       vault.on("delete", async (file) => {
         this.removeFile(file.path);
@@ -65,7 +56,7 @@ export class MetadataIndexer {
     await this.rebuildBibIndex();
     const files = this.plugin.app.vault
       .getFiles()
-      .filter((f) => f.extension === "typ");
+      .filter((f) => f.extension === "typ" || f.extension === "bib");
     for (const file of files) {
       await this.indexFile(file);
     }
@@ -104,17 +95,38 @@ export class MetadataIndexer {
 
   async indexFile(file: TFile): Promise<void> {
     const content = await this.plugin.app.vault.cachedRead(file);
-    const targets = this.extractLinks(content, file.path);
 
     const resolved: Record<string, number> = {};
-    for (const t of targets) resolved[t] = (resolved[t] || 0) + 1;
+    const unresolved: Record<string, number> = {};
+
+    if (file.extension === "typ") {
+      for (const t of this.extractLinks(content, file.path)) {
+        resolved[t] = (resolved[t] || 0) + 1;
+      }
+      for (const key of this.extractCitedKeys(content)) {
+        unresolved[key] = (unresolved[key] || 0) + 1;
+      }
+    } else if (file.extension === "bib") {
+      // The bib file itself "links to" each entry it defines, so the
+      // entry node and the bib hub appear connected in the graph.
+      for (const key of this.extractDefinedKeys(content)) {
+        unresolved[key] = (unresolved[key] || 0) + 1;
+      }
+    }
 
     const cache = this.plugin.app.metadataCache as any;
     cache.resolvedLinks ??= {};
+    cache.unresolvedLinks ??= {};
+
     if (Object.keys(resolved).length > 0) {
       cache.resolvedLinks[file.path] = resolved;
     } else {
       delete cache.resolvedLinks[file.path];
+    }
+    if (Object.keys(unresolved).length > 0) {
+      cache.unresolvedLinks[file.path] = unresolved;
+    } else {
+      delete cache.unresolvedLinks[file.path];
     }
 
     this.plugin.app.metadataCache.trigger("resolve", file);
@@ -122,12 +134,16 @@ export class MetadataIndexer {
 
   removeFile(path: string): void {
     const cache = this.plugin.app.metadataCache as any;
-    if (!cache.resolvedLinks) return;
-    delete cache.resolvedLinks[path];
-    for (const src of Object.keys(cache.resolvedLinks)) {
-      if (cache.resolvedLinks[src][path]) {
-        delete cache.resolvedLinks[src][path];
+    if (cache.resolvedLinks) {
+      delete cache.resolvedLinks[path];
+      for (const src of Object.keys(cache.resolvedLinks)) {
+        if (cache.resolvedLinks[src][path]) {
+          delete cache.resolvedLinks[src][path];
+        }
       }
+    }
+    if (cache.unresolvedLinks) {
+      delete cache.unresolvedLinks[path];
     }
     this.plugin.app.metadataCache.trigger("resolved");
   }
@@ -180,19 +196,34 @@ export class MetadataIndexer {
       if (resolved) targets.push(resolved);
     }
 
-    // Typst citations: @citationKey. We can't reliably distinguish a
-    // citation `@smith2024` from a same-doc label `@my-section` just
-    // from the source, so we only emit an edge when the key matches a
-    // BibTeX entry we've indexed. False positives stay invisible.
-    if (this.bibKeyToPath.size > 0) {
-      const citeRe = /(?<![\w@])@([A-Za-z][A-Za-z0-9_:.\-]*)/g;
-      while ((m = citeRe.exec(content)) !== null) {
-        const bibPath = this.bibKeyToPath.get(m[1]);
-        if (bibPath) targets.push(bibPath);
-      }
-    }
-
     return targets;
+  }
+
+  // Cited bib keys in a .typ file: every `@key` that matches a known
+  // bib entry. Typst's @key syntax doesn't distinguish citation from
+  // same-doc label reference, so we filter by membership in the
+  // indexed bib keys to avoid drawing phantom citation nodes from
+  // in-document labels that happen to share a key.
+  private extractCitedKeys(content: string): string[] {
+    if (this.bibKeyToPath.size === 0) return [];
+    const out: string[] = [];
+    const citeRe = /(?<![\w@])@([A-Za-z][A-Za-z0-9_:.\-]*)/g;
+    let m;
+    while ((m = citeRe.exec(content)) !== null) {
+      if (this.bibKeyToPath.has(m[1])) out.push(m[1]);
+    }
+    return out;
+  }
+
+  // Defined bib keys in a .bib file: every `@<type>{<key>,` header.
+  private extractDefinedKeys(content: string): string[] {
+    const out: string[] = [];
+    const entryRe = /@\w+\s*\{\s*([A-Za-z0-9_:.\-]+)\s*,/g;
+    let m;
+    while ((m = entryRe.exec(content)) !== null) {
+      out.push(m[1]);
+    }
+    return out;
   }
 
   private tryResolve(rawPath: string, sourceDir: string): string | null {
