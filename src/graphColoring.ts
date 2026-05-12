@@ -124,6 +124,14 @@ export class GraphColoringPatch {
       }
       return origSetData(data);
     };
+    // The view's first setData() fires during view construction, before
+    // we get a chance to wrap. Force a re-render now that our wrapper
+    // is in place so the current graph state passes through it.
+    if (typeof eng.render === "function") {
+      try {
+        eng.render();
+      } catch {}
+    }
   }
 
   private injectAttachmentColors(data: any, eng: any): void {
