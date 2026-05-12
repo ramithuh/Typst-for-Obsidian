@@ -80,8 +80,10 @@ export class GraphColoringPatch {
 
   // Wrap each searchQuery's `match()` so it falls back to matchFilepath
   // for .typ files. Re-patches new queries as the user adds groups.
+  // The fallback is gated by the user's setting at call time.
   private patchSearchQueries(eng: any): void {
     if (!eng.searchQueries) return;
+    const plugin = this.plugin as any;
     for (const sq of eng.searchQueries) {
       const q = sq.query;
       if (!q || (q as any)[SENTINEL_QUERY]) continue;
@@ -89,6 +91,7 @@ export class GraphColoringPatch {
       q.match = function (file: any) {
         const r = original(file);
         if (r) return r;
+        if (!plugin.settings?.enableTypstGraphColoring) return null;
         if (
           file?.extension === TARGET_EXT &&
           typeof q.matchFilepath === "function"
@@ -124,6 +127,7 @@ export class GraphColoringPatch {
   }
 
   private injectAttachmentColors(data: any, eng: any): void {
+    if (!(this.plugin as any).settings?.enableTypstGraphColoring) return;
     const nodes = data?.nodes;
     if (!nodes || typeof nodes !== "object") return;
     const groups: ColorGroup[] = eng.searchQueries || [];

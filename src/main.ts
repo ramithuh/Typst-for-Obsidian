@@ -71,11 +71,10 @@ export default class TypstForObsidian extends Plugin {
 
     // Monkey-patch Obsidian's graph view so color groups also apply to
     // .typ files (Obsidian core treats them as attachments and skips
-    // group queries — see graphColoring.ts).
-    if (this.settings.enableTypstGraphColoring) {
-      this.graphColoringPatch = new GraphColoringPatch(this);
-      this.graphColoringPatch.register();
-    }
+    // group queries — see graphColoring.ts). Always register; the
+    // setting is checked at runtime inside the patch.
+    this.graphColoringPatch = new GraphColoringPatch(this);
+    this.graphColoringPatch.register();
 
     // Tell the WASM compiler to drop its cached source whenever a .typ
     // file in the vault changes, so the next compile re-reads it.
