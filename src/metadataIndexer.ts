@@ -8,8 +8,13 @@ import { Plugin, TFile, TAbstractFile } from "obsidian";
 //   #include "path.typ"
 //   #import "path.typ": ...
 //   #link("./path.typ")    (relative vault paths only)
+//   @citationKey           (mapped to the .bib file that defines it)
 export class MetadataIndexer {
   private plugin: Plugin;
+  // citation key -> vault path of the .bib file defining it. Populated
+  // by indexBib() and refreshed when any .bib changes. Used so that a
+  // `@key` in a .typ source can be wired to its bib's graph node.
+  private bibKeyToPath: Map<string, string> = new Map();
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -19,22 +24,34 @@ export class MetadataIndexer {
     const { vault } = this.plugin.app;
 
     this.plugin.registerEvent(
-      vault.on("modify", (file) => {
-        if (file instanceof TFile && file.extension === "typ") {
-          this.indexFile(file);
+      vault.on("modify", async (file) => {
+        if (!(file instanceof TFile)) return;
+        if (file.extension === "bib") {
+          await this.rebuildBibIndex();
+          await this.reindexAllTyp();
+        } else if (file.extension === "typ") {
+          await this.indexFile(file);
         }
       }),
     );
     this.plugin.registerEvent(
-      vault.on("create", (file) => {
-        if (file instanceof TFile && file.extension === "typ") {
-          this.indexFile(file);
+      vault.on("create", async (file) => {
+        if (!(file instanceof TFile)) return;
+        if (file.extension === "bib") {
+          await this.rebuildBibIndex();
+          await this.reindexAllTyp();
+        } else if (file.extension === "typ") {
+          await this.indexFile(file);
         }
       }),
     );
     this.plugin.registerEvent(
-      vault.on("delete", (file) => {
+      vault.on("delete", async (file) => {
         this.removeFile(file.path);
+        if (file instanceof TFile && file.extension === "bib") {
+          await this.rebuildBibIndex();
+          await this.reindexAllTyp();
+        }
       }),
     );
     this.plugin.registerEvent(
@@ -45,6 +62,7 @@ export class MetadataIndexer {
   }
 
   async indexAll(): Promise<void> {
+    await this.rebuildBibIndex();
     const files = this.plugin.app.vault
       .getFiles()
       .filter((f) => f.extension === "typ");
@@ -52,6 +70,36 @@ export class MetadataIndexer {
       await this.indexFile(file);
     }
     this.plugin.app.metadataCache.trigger("resolved");
+  }
+
+  private async reindexAllTyp(): Promise<void> {
+    const files = this.plugin.app.vault
+      .getFiles()
+      .filter((f) => f.extension === "typ");
+    for (const file of files) {
+      await this.indexFile(file);
+    }
+    this.plugin.app.metadataCache.trigger("resolved");
+  }
+
+  // Walk every .bib file and rebuild bibKeyToPath. Each entry header
+  // matches `@<type>{<key>,` (case-insensitive type, alphanumeric +
+  // `:-_.` in the key — typical BibTeX). When the same key appears in
+  // multiple .bib files, the last one wins; that's a vault-organization
+  // problem more than a plugin one.
+  private async rebuildBibIndex(): Promise<void> {
+    this.bibKeyToPath.clear();
+    const bibFiles = this.plugin.app.vault
+      .getFiles()
+      .filter((f) => f.extension === "bib");
+    const entryRe = /@\w+\s*\{\s*([A-Za-z0-9_:.\-]+)\s*,/g;
+    for (const file of bibFiles) {
+      const content = await this.plugin.app.vault.cachedRead(file);
+      let m;
+      while ((m = entryRe.exec(content)) !== null) {
+        this.bibKeyToPath.set(m[1], file.path);
+      }
+    }
   }
 
   async indexFile(file: TFile): Promise<void> {
@@ -130,6 +178,18 @@ export class MetadataIndexer {
       const path = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
       const resolved = this.tryResolve(path, sourceDir);
       if (resolved) targets.push(resolved);
+    }
+
+    // Typst citations: @citationKey. We can't reliably distinguish a
+    // citation `@smith2024` from a same-doc label `@my-section` just
+    // from the source, so we only emit an edge when the key matches a
+    // BibTeX entry we've indexed. False positives stay invisible.
+    if (this.bibKeyToPath.size > 0) {
+      const citeRe = /(?<![\w@])@([A-Za-z][A-Za-z0-9_:.\-]*)/g;
+      while ((m = citeRe.exec(content)) !== null) {
+        const bibPath = this.bibKeyToPath.get(m[1]);
+        if (bibPath) targets.push(bibPath);
+      }
     }
 
     return targets;
