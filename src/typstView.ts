@@ -663,16 +663,22 @@ export class TypstView extends TextFileView {
     const zoomInner = this.ensureZoomInner(readingDiv);
     zoomInner.style.transformOrigin = "0 0";
     zoomInner.style.willChange = "transform";
-    // Visual padding around the page content lives on zoomInner so it
-    // sits *inside* the transformed coordinate frame. The cursor math
-    // automatically handles it (padding is just part of zoomInner's
-    // local space). Padding scales with zoom — fine for our use case.
-    zoomInner.style.padding = "24px 24px 24px 24px";
+    // display:inline-block makes zoomInner shrink-to-fit its content
+    // instead of expanding to readingDiv's full width. That makes
+    // `scrollWidth` reflect the actual page width rather than the
+    // viewport width, so readingDiv's width-after-zoom doesn't leave
+    // an empty band of background to the right of the content.
+    zoomInner.style.display = "inline-block";
+    zoomInner.style.padding = "24px";
     zoomInner.style.boxSizing = "border-box";
     // Strip readingDiv's padding/margin so zoomInner sits at (0,0)
     // of readingDiv (the scroll-content frame's origin).
     readingDiv.style.padding = "0";
     readingDiv.style.margin = "0";
+    // Vertical-only overflow on readingDiv lets the horizontal scroll
+    // bar live on the outer scroller (contentEl) rather than appearing
+    // unnecessarily here.
+    readingDiv.style.overflow = "visible";
 
     let committedScale = 1;
     let pendingScale = 1;
