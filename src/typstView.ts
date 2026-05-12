@@ -712,14 +712,21 @@ export class TypstView extends TextFileView {
 
     const stepZoom = (newScale: number, clientX: number, clientY: number) => {
       const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newScale));
-      // World point (in zoomInner-local coordinates) currently under
-      // the cursor. We solve for newTx/newTy so that this same world
-      // point lands under the cursor again at the new scale.
-      const worldX = (clientX - pendingTx) / pendingScale;
-      const worldY = (clientY - pendingTy) / pendingScale;
+      // Use the live bounding rect (post-transform position of
+      // zoomInner's pre-transform origin = rect.left - pendingTx).
+      // The world point (zoomInner-local, pre-transform) under the
+      // cursor is (clientX - rect.left) / pendingScale.
+      const rect = zoomInner.getBoundingClientRect();
+      const worldX = (clientX - rect.left) / pendingScale;
+      const worldY = (clientY - rect.top) / pendingScale;
+      // Goal: at the new scale, the same world point should sit under
+      // the cursor again ⇒ new rect.left = clientX − worldX × newScale.
+      // newTx = pendingTx + (newRectLeft − rect.left), since
+      // newRectLeft − rect.left = newTx − pendingTx (translate is in
+      // viewport units in the `translate(tx) scale(s)` form we use).
+      pendingTx += clientX - worldX * clamped - rect.left;
+      pendingTy += clientY - worldY * clamped - rect.top;
       pendingScale = clamped;
-      pendingTx = clientX - worldX * clamped;
-      pendingTy = clientY - worldY * clamped;
       applyTransform();
     };
 
