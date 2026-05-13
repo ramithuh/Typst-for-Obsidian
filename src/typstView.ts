@@ -687,8 +687,17 @@ export class TypstView extends TextFileView {
     let naturalW = 0;
     let naturalH = 0;
     const measureNatural = () => {
-      naturalW = zoomInner.scrollWidth;
-      naturalH = zoomInner.scrollHeight;
+      // In SVG mode the per-page SVGs are sized at base × committedScale
+      // after a commit; divide back out so naturalW/H always represent
+      // the "size at zoom 1" needed by readingDiv.width = natural × scale.
+      // In PDF mode canvases don't change size with zoom, so scrollWidth
+      // already equals the 1× natural size.
+      const factor =
+        this.plugin.settings.previewRenderer === "svg"
+          ? committedScale || 1
+          : 1;
+      naturalW = zoomInner.scrollWidth / factor;
+      naturalH = zoomInner.scrollHeight / factor;
     };
 
     const findScroller = (): HTMLElement => {
@@ -737,12 +746,22 @@ export class TypstView extends TextFileView {
     };
 
     // Convert the live transform state into a clean (no-translate)
-    // scale + scroll position. Algebra:
-    //   Pre-commit, content at zoomInner-local (lx, ly) is visible at
-    //     viewport_x = -scrollLeft_before + pendingTx + lx*pendingScale.
-    //   Post-commit (transform = scale, no translate, scroll = newSL):
-    //     viewport_x = -newSL + lx*pendingScale.
-    //   Continuity ⇒ newSL = scrollLeft_before - pendingTx.
+    // representation. Two modes:
+    //
+    // - SVG: re-size each per-page <svg> so the browser re-rasterizes
+    //   the vector primitives at the new resolution (crisp at any
+    //   zoom). zoomInner's transform resets to identity.
+    // - PDF (bitmap canvases that can't be cheaply re-rasterized):
+    //   keep transform: scale on zoomInner. Image stays bitmap-
+    //   stretched (still blurry at non-1× zoom). A proper PDF crisp
+    //   path would re-rasterize PDFium at the new scale — TODO.
+    //
+    // Scroll math is the same in either mode: pre-commit visual
+    // position is preserved by setting scroll_after = scroll_before
+    // − pendingTx, since pendingTx is in unscaled viewport units in
+    // the `translate(tx) scale(s)` transform form we use.
+    const isSvgMode = () =>
+      this.plugin.settings.previewRenderer === "svg";
     const commit = () => {
       commitTimer = null;
       if (!naturalW || !naturalH) measureNatural();
@@ -757,9 +776,24 @@ export class TypstView extends TextFileView {
       readingDiv.style.height = naturalH * pendingScale + "px";
       pendingTx = 0;
       pendingTy = 0;
-      zoomInner.style.transform = `scale(${pendingScale})`;
-      // Set scroll AFTER dimensions, otherwise the new scroll values
-      // might be clipped to the old (smaller) scroll bounds.
+      if (isSvgMode()) {
+        // Bake the new zoom into each SVG's CSS dimensions so the
+        // browser re-paints vector primitives at the new resolution.
+        const svgs = zoomInner.querySelectorAll(
+          ":scope > .typst-pdf-page > svg",
+        ) as NodeListOf<SVGSVGElement>;
+        svgs.forEach((svg) => {
+          const bW = parseFloat(svg.dataset.baseW || "0");
+          const bH = parseFloat(svg.dataset.baseH || "0");
+          if (bW > 0 && bH > 0) {
+            svg.style.width = `${bW * pendingScale}px`;
+            svg.style.height = `${bH * pendingScale}px`;
+          }
+        });
+        zoomInner.style.transform = "";
+      } else {
+        zoomInner.style.transform = `scale(${pendingScale})`;
+      }
       scroller.scrollLeft = newScrollLeft;
       scroller.scrollTop = newScrollTop;
       committedScale = pendingScale;
@@ -767,9 +801,28 @@ export class TypstView extends TextFileView {
 
     // Re-measure naturals on content change. If a recompile happens
     // outside a gesture, also rewrite readingDiv dimensions so the
-    // scrollbar stays in sync.
+    // scrollbar stays in sync. In SVG mode, also re-apply the current
+    // committedScale to any freshly inserted SVGs (renderers insert
+    // them at base size, so without this they'd briefly show at 1×
+    // before being corrected on the next user zoom).
     const mo = new MutationObserver(() => {
       requestAnimationFrame(() => {
+        if (isSvgMode() && committedScale !== 1) {
+          const svgs = zoomInner.querySelectorAll(
+            ":scope > .typst-pdf-page > svg",
+          ) as NodeListOf<SVGSVGElement>;
+          svgs.forEach((svg) => {
+            const bW = parseFloat(svg.dataset.baseW || "0");
+            const bH = parseFloat(svg.dataset.baseH || "0");
+            if (bW <= 0 || bH <= 0) return;
+            const wantW = bW * committedScale;
+            const curW = parseFloat(svg.style.width || "0");
+            if (Math.abs(curW - wantW) > 0.5) {
+              svg.style.width = `${wantW}px`;
+              svg.style.height = `${bH * committedScale}px`;
+            }
+          });
+        }
         measureNatural();
         if (!naturalW || !naturalH) return;
         if (pendingTx === 0 && pendingTy === 0) {

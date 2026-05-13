@@ -75,12 +75,19 @@ export class SvgRenderer {
     if (!svg) return;
     // Force the SVG to a CSS-pixel size matching the PDF point size *
     // PDF_RENDER_SCALE, so SVG output occupies the same on-screen area
-    // as our PDFium canvases did at the default zoom.
+    // as our PDFium canvases did at the default zoom. Also stash the
+    // base dimensions as data attributes so the zoom commit can read
+    // them back and re-rasterize the SVG crisply at any committed
+    // zoom level (browser re-paints vector at new CSS dimensions).
     const viewBox = svg.viewBox?.baseVal;
     if (viewBox) {
-      svg.style.width = `${viewBox.width * PDF_RENDER_SCALE}px`;
-      svg.style.height = `${viewBox.height * PDF_RENDER_SCALE}px`;
+      const baseW = viewBox.width * PDF_RENDER_SCALE;
+      const baseH = viewBox.height * PDF_RENDER_SCALE;
+      svg.style.width = `${baseW}px`;
+      svg.style.height = `${baseH}px`;
       svg.style.display = "block";
+      svg.dataset.baseW = String(baseW);
+      svg.dataset.baseH = String(baseH);
     }
     if (!isReuse) {
       this.attachLinkHandlers(svg, onBacklinkClick);
