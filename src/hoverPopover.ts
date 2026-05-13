@@ -26,6 +26,15 @@ interface HoverLinkParams {
   sourcePath?: string;
 }
 
+// How long the cursor must dwell on a node before we kick off a real
+// Typst compile for the rendered preview. Brushing past nodes shouldn't
+// fire ~50 compiles; deliberately pausing on one should.
+const RENDER_DEBOUNCE_MS = 400;
+
+// Container clip for the rendered section. Bigger than this gets a
+// scrollbar; smaller is shown flush. Same width as the popover.
+const RENDER_MAX_HEIGHT = 320;
+
 export class TypstHoverPopover {
   private plugin: Plugin;
   // Currently visible popover and the linktext it was opened for. We
@@ -35,6 +44,14 @@ export class TypstHoverPopover {
   private currentPopover: HTMLElement | null = null;
   private currentLinktext: string | null = null;
   private dismissCleanup: (() => void) | null = null;
+  // Stabilization timer for the rendered preview. Cancelled whenever
+  // the popover is dismissed or replaced with a different node's
+  // popover; only fires if the user really has paused on a node.
+  private renderTimer: number | null = null;
+  // Cache: vault path -> { hash of source, rendered SVG markup pages }.
+  // Invalidated when the file is modified (see register()).
+  private renderedCache: Map<string, { hash: number; svgs: string[] }> =
+    new Map();
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -46,6 +63,15 @@ export class TypstHoverPopover {
         "hover-link",
         (params: HoverLinkParams) => this.onHoverLink(params),
       ),
+    );
+    // Drop cached renderings whenever a .typ file is modified so the
+    // next hover compiles afresh against the new source.
+    this.plugin.registerEvent(
+      this.plugin.app.vault.on("modify", (f) => {
+        if (f && (f as any).extension === "typ") {
+          this.renderedCache.delete(f.path);
+        }
+      }),
     );
   }
 
@@ -66,6 +92,10 @@ export class TypstHoverPopover {
   }
 
   private removeCurrent(): void {
+    if (this.renderTimer !== null) {
+      window.clearTimeout(this.renderTimer);
+      this.renderTimer = null;
+    }
     if (this.dismissCleanup) {
       this.dismissCleanup();
       this.dismissCleanup = null;
@@ -121,6 +151,131 @@ export class TypstHoverPopover {
     // otherwise; either way we don't block the popover's initial paint.
     // If the user moves away before the snippet arrives, we drop it.
     void this.loadSnippetInto(popover, file);
+
+    // Schedule a stabilization-timed compile. If the cursor lingers
+    // long enough on this node, we'll render the actual Typst output
+    // and swap it in for the text snippet.
+    this.scheduleRender(popover, file, linktext);
+  }
+
+  // Schedule a Typst compile after the user pauses on a node. Cached
+  // results render instantly; cold compiles take ~100-500ms but the
+  // worker doesn't block the UI. The timer is cancelled in
+  // removeCurrent() so brushing across nodes never fires a compile.
+  private scheduleRender(
+    popover: HTMLElement,
+    file: TFile,
+    linktext: string,
+  ): void {
+    if (this.renderTimer !== null) {
+      window.clearTimeout(this.renderTimer);
+    }
+    // Cache hit: render immediately, no debounce needed. (We still
+    // need the hash check inside renderInto to validate freshness.)
+    if (this.renderedCache.has(linktext)) {
+      void this.renderInto(popover, file, linktext);
+      return;
+    }
+    this.renderTimer = window.setTimeout(() => {
+      this.renderTimer = null;
+      if (this.currentPopover !== popover) return;
+      void this.renderInto(popover, file, linktext);
+    }, RENDER_DEBOUNCE_MS);
+  }
+
+  // Read source, hash it, check cache, compile if cold, then swap the
+  // text snippet for a scrollable rendered preview. Bails at every
+  // await boundary if the popover has been dismissed or replaced.
+  private async renderInto(
+    popover: HTMLElement,
+    file: TFile,
+    linktext: string,
+  ): Promise<void> {
+    let source: string;
+    try {
+      source = await this.plugin.app.vault.cachedRead(file);
+    } catch {
+      return;
+    }
+    if (this.currentPopover !== popover) return;
+
+    const hash = hashString(source);
+    let svgs: string[] | null = null;
+    const cached = this.renderedCache.get(linktext);
+    if (cached && cached.hash === hash) {
+      svgs = cached.svgs;
+    } else {
+      try {
+        svgs = await (this.plugin as any).compileToSvgs(source, file.path);
+      } catch {
+        svgs = null;
+      }
+      if (this.currentPopover !== popover) return;
+      if (svgs && svgs.length > 0) {
+        this.renderedCache.set(linktext, { hash, svgs });
+      }
+    }
+    if (!svgs || svgs.length === 0) return;
+    this.replaceSnippetWithRender(popover, svgs);
+  }
+
+  // Replace any existing snippet div with a scrollable container that
+  // holds the rendered SVGs. SVGs auto-fit the popover width (340px
+  // max via popover style) and scroll vertically past RENDER_MAX_HEIGHT.
+  // Path footer stays at the bottom.
+  private replaceSnippetWithRender(
+    popover: HTMLElement,
+    svgs: string[],
+  ): void {
+    const existing = popover.querySelector(
+      ".typst-hover-snippet, .typst-hover-render",
+    );
+    if (existing) existing.remove();
+
+    const container = document.createElement("div");
+    container.className = "typst-hover-render";
+    Object.assign(container.style, {
+      marginTop: "10px",
+      maxHeight: `${RENDER_MAX_HEIGHT}px`,
+      overflowY: "auto",
+      overflowX: "hidden",
+      borderLeft: "2px solid var(--background-modifier-border)",
+      paddingLeft: "8px",
+      background: "var(--background-primary)",
+    });
+
+    for (const svgMarkup of svgs) {
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "6px";
+      wrap.innerHTML = svgMarkup;
+      const svg = wrap.querySelector("svg") as SVGSVGElement | null;
+      if (svg) {
+        // Width-fit; height tracks natural aspect via viewBox.
+        svg.removeAttribute("width");
+        svg.removeAttribute("height");
+        svg.style.width = "100%";
+        svg.style.height = "auto";
+        svg.style.display = "block";
+      }
+      container.appendChild(wrap);
+    }
+
+    // Insert before the path footer (last child) so the path remains
+    // pinned at the bottom of the popover for reference.
+    const pathEl = popover.lastElementChild;
+    if (pathEl) popover.insertBefore(container, pathEl);
+    else popover.appendChild(container);
+
+    // Nudge the popover back into view if the growth pushed it past
+    // the viewport bottom edge.
+    const rect = popover.getBoundingClientRect();
+    if (rect.bottom > window.innerHeight - 8) {
+      const newTop = Math.max(
+        8,
+        window.innerHeight - rect.height - 8,
+      );
+      popover.style.top = `${newTop + window.scrollY}px`;
+    }
   }
 
   private renderBody(
@@ -346,11 +501,14 @@ export class TypstHoverPopover {
       return;
     }
     if (this.currentPopover !== popover || !popover.isConnected) return;
+    // If the rendered preview already landed, don't backfill text.
+    if (popover.querySelector(".typst-hover-render")) return;
 
     const snippet = extractSnippet(content);
     if (!snippet) return;
 
     const snippetEl = document.createElement("div");
+    snippetEl.className = "typst-hover-snippet";
     Object.assign(snippetEl.style, {
       marginTop: "10px",
       paddingLeft: "8px",
@@ -471,6 +629,18 @@ function stripMetaBlock(content: string): string {
     }
   }
   return content; // unbalanced — leave as-is
+}
+
+// FNV-1a 32-bit hash. Used to key the rendered-preview cache so we
+// re-compile when source changes (and bypass the cache silently when
+// the file is edited between hovers).
+function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h >>> 0;
 }
 
 function statusBackground(status: string): string {
