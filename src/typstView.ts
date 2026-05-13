@@ -674,16 +674,22 @@ export class TypstView extends TextFileView {
     // SVGs resize), introducing a ~24px×(rel−1) settle-time offset.
     zoomInner.style.padding = "0";
     zoomInner.style.margin = "0";
-    readingDiv.style.padding = "24px";
+    const PREVIEW_PADDING = 24;
+    readingDiv.style.padding = `${PREVIEW_PADDING}px`;
     readingDiv.style.margin = "0";
     readingDiv.style.overflow = "visible";
-    readingDiv.style.boxSizing = "content-box";
+    // Use border-box so `width` and `minWidth` include padding. With
+    // content-box, `minWidth: 100%` would force the content area to
+    // the scroller width, then padding would add 48px on top and
+    // produce a phantom horizontal scrollbar even when fully zoomed
+    // out. border-box makes the total box exactly the scroller width.
+    readingDiv.style.boxSizing = "border-box";
     // Center zoomInner horizontally when content is narrower than the
-    // scroller. minWidth:100% forces readingDiv to be at least as wide
-    // as its parent (the scroller's clientWidth), and text-align:center
-    // centers the inline-block zoomInner inside that extra space. When
-    // content is wider than the scroller, the explicit readingDiv
-    // style.width (set during commit) wins; centering does nothing.
+    // scroller. minWidth:100% guarantees readingDiv is at least as wide
+    // as its parent, so text-align:center has extra space to center
+    // the inline-block zoomInner. When content is wider, the explicit
+    // readingDiv style.width (set during commit) wins and centering
+    // is a no-op (horizontal scroll kicks in instead).
     readingDiv.style.minWidth = "100%";
     readingDiv.style.textAlign = "center";
 
@@ -787,8 +793,11 @@ export class TypstView extends TextFileView {
       const preOffsetLeft = zoomInner.offsetLeft;
       const preOffsetTop = zoomInner.offsetTop;
 
-      readingDiv.style.width = naturalW * pendingScale + "px";
-      readingDiv.style.height = naturalH * pendingScale + "px";
+      // border-box: width/height include readingDiv's padding.
+      readingDiv.style.width =
+        naturalW * pendingScale + 2 * PREVIEW_PADDING + "px";
+      readingDiv.style.height =
+        naturalH * pendingScale + 2 * PREVIEW_PADDING + "px";
 
       if (isSvgMode()) {
         // Bake the new zoom into each SVG's CSS dimensions so the
@@ -852,8 +861,10 @@ export class TypstView extends TextFileView {
         measureNatural();
         if (!naturalW || !naturalH) return;
         if (pendingTx === 0 && pendingTy === 0) {
-          readingDiv.style.width = naturalW * committedScale + "px";
-          readingDiv.style.height = naturalH * committedScale + "px";
+          readingDiv.style.width =
+            naturalW * committedScale + 2 * PREVIEW_PADDING + "px";
+          readingDiv.style.height =
+            naturalH * committedScale + 2 * PREVIEW_PADDING + "px";
         }
       });
     });
