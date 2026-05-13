@@ -28,6 +28,13 @@ interface HoverLinkParams {
 
 export class TypstHoverPopover {
   private plugin: Plugin;
+  // Currently visible popover and the linktext it was opened for. We
+  // track these so successive hover-link events on the same node don't
+  // tear down + rebuild the popover (would flicker), and moving to a
+  // different node smoothly swaps content rather than stacking.
+  private currentPopover: HTMLElement | null = null;
+  private currentLinktext: string | null = null;
+  private dismissCleanup: (() => void) | null = null;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -50,11 +57,24 @@ export class TypstHoverPopover {
     const file = this.plugin.app.vault.getAbstractFileByPath(linktext);
     if (!(file instanceof TFile)) return;
 
-    const meta = this.lookupMeta(linktext);
-    const targetEl = params.targetEl || params.hoverParent?.containerEl;
-    if (!targetEl) return;
+    // Same node we're already showing — leave the popover alone.
+    if (this.currentLinktext === linktext && this.currentPopover) return;
 
-    this.showPopover(targetEl, file, meta);
+    this.removeCurrent();
+    const meta = this.lookupMeta(linktext);
+    this.showPopover(params, file, meta, linktext);
+  }
+
+  private removeCurrent(): void {
+    if (this.dismissCleanup) {
+      this.dismissCleanup();
+      this.dismissCleanup = null;
+    }
+    if (this.currentPopover) {
+      this.currentPopover.remove();
+      this.currentPopover = null;
+    }
+    this.currentLinktext = null;
   }
 
   private lookupMeta(path: string): NoteMeta | undefined {
@@ -62,19 +82,18 @@ export class TypstHoverPopover {
     return indexer?.metaByPath?.get(path);
   }
 
-  // Build and position the popover. Anchored to the target element's
-  // bounding rect; we offset enough to not occlude the cursor. The
-  // popover is removed when the pointer leaves both the popover and
-  // the target (handled by the dismiss helper) so it doesn't linger
-  // after the user moves away.
+  // Build and position the popover. Graph nodes are canvas pixels (no
+  // DOM target to anchor to), so we position relative to the cursor
+  // from the event's clientX/clientY. Dismissal: another hover-link
+  // for a different file replaces the popover; click outside it
+  // dismisses; if the cursor moves away from both the popover and the
+  // approximate node area, an idle timer eventually hides it.
   private showPopover(
-    targetEl: HTMLElement,
+    params: HoverLinkParams,
     file: TFile,
     meta: NoteMeta | undefined,
+    linktext: string,
   ): void {
-    const existing = document.querySelector(".typst-hover-popover");
-    if (existing) existing.remove();
-
     const popover = document.body.createDiv("typst-hover-popover");
     Object.assign(popover.style, {
       position: "absolute",
@@ -92,8 +111,10 @@ export class TypstHoverPopover {
     });
 
     this.renderBody(popover, file, meta);
-    this.positionNear(popover, targetEl);
-    this.attachDismiss(popover, targetEl);
+    this.positionAtCursor(popover, params.event);
+    this.dismissCleanup = this.attachDismiss(popover, params.event);
+    this.currentPopover = popover;
+    this.currentLinktext = linktext;
   }
 
   private renderBody(
@@ -178,13 +199,18 @@ export class TypstHoverPopover {
     });
   }
 
-  // Place the popover near the target without spilling off-screen.
-  // Default: below the target, slight horizontal offset. If that would
-  // overflow the viewport, mirror to above or the opposite side.
-  private positionNear(popover: HTMLElement, targetEl: HTMLElement): void {
-    const rect = targetEl.getBoundingClientRect();
-    const margin = 8;
-    // Force layout so we can read offsetWidth/Height before placement.
+  // Position popover relative to the cursor from the hover event.
+  // We offset by a few pixels so the popover doesn't sit under the
+  // cursor (which would block interaction and trigger immediate
+  // leave/re-enter loops). Mirror to the opposite side if we would
+  // overflow the viewport.
+  private positionAtCursor(popover: HTMLElement, event?: MouseEvent): void {
+    const margin = 12;
+    // Reasonable fallback in case event is missing (defensive).
+    const cx = event?.clientX ?? window.innerWidth / 2;
+    const cy = event?.clientY ?? window.innerHeight / 2;
+
+    // Force layout so we can read width/height before final placement.
     popover.style.visibility = "hidden";
     popover.style.left = "0px";
     popover.style.top = "0px";
@@ -193,62 +219,89 @@ export class TypstHoverPopover {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
-    let left = rect.right + margin;
-    let top = rect.top;
-    if (left + pw > vw) left = Math.max(margin, rect.left - pw - margin);
-    if (top + ph > vh) top = Math.max(margin, vh - ph - margin);
+    let left = cx + margin;
+    let top = cy + margin;
+    if (left + pw > vw) left = Math.max(margin, cx - pw - margin);
+    if (top + ph > vh) top = Math.max(margin, cy - ph - margin);
 
     popover.style.left = `${left + window.scrollX}px`;
     popover.style.top = `${top + window.scrollY}px`;
     popover.style.visibility = "visible";
   }
 
-  // Dismiss when the pointer leaves both popover and target, or on
-  // mousedown elsewhere. We also self-destruct after 30s as a safety
-  // net so a stuck popover doesn't survive forever if event listeners
-  // get torn down by Obsidian transitions.
-  private attachDismiss(popover: HTMLElement, targetEl: HTMLElement): void {
-    let hovering = true;
+  // Dismiss policy (canvas-rendered nodes have no DOM mouseleave):
+  //   - mousedown outside the popover → dismiss immediately
+  //   - mousemove that's > 80px from the popover bounds AND not over
+  //     the popover itself → dismiss after a short grace period
+  //   - 30s safety timeout in case the cursor goes idle
+  // While the cursor is INSIDE the popover, dismissal is paused so
+  // the user can read longer fields (e.g. origin) without it vanishing.
+  private attachDismiss(
+    popover: HTMLElement,
+    event?: MouseEvent,
+  ): () => void {
+    let insidePopover = false;
+    let dismissTimer: number | null = null;
+
     const dismiss = () => {
-      if (!hovering) {
-        popover.remove();
-        cleanup();
+      popover.remove();
+      if (this.currentPopover === popover) {
+        this.currentPopover = null;
+        this.currentLinktext = null;
+      }
+      cleanup();
+    };
+
+    const scheduleDismiss = (delay: number) => {
+      if (insidePopover) return;
+      if (dismissTimer !== null) window.clearTimeout(dismissTimer);
+      dismissTimer = window.setTimeout(dismiss, delay);
+    };
+
+    const cancelDismiss = () => {
+      if (dismissTimer !== null) {
+        window.clearTimeout(dismissTimer);
+        dismissTimer = null;
       }
     };
-    const onLeavePopover = () => {
-      hovering = false;
-      setTimeout(dismiss, 80);
-    };
-    const onLeaveTarget = () => {
-      hovering = false;
-      setTimeout(dismiss, 80);
-    };
+
     const onEnter = () => {
-      hovering = true;
+      insidePopover = true;
+      cancelDismiss();
+    };
+    const onLeave = () => {
+      insidePopover = false;
+      scheduleDismiss(120);
+    };
+    const onMousemove = (e: MouseEvent) => {
+      if (insidePopover) return;
+      const rect = popover.getBoundingClientRect();
+      const dx = Math.max(rect.left - e.clientX, e.clientX - rect.right, 0);
+      const dy = Math.max(rect.top - e.clientY, e.clientY - rect.bottom, 0);
+      // Distance from the popover edge in either axis. Once we're far
+      // enough from both popover and the original node, allow dismiss.
+      if (dx > 80 || dy > 80) scheduleDismiss(200);
     };
     const onMousedown = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node)) {
-        popover.remove();
-        cleanup();
-      }
+      if (!popover.contains(e.target as Node)) dismiss();
     };
 
     popover.addEventListener("mouseenter", onEnter);
-    popover.addEventListener("mouseleave", onLeavePopover);
-    targetEl.addEventListener("mouseleave", onLeaveTarget);
+    popover.addEventListener("mouseleave", onLeave);
+    document.addEventListener("mousemove", onMousemove, true);
     document.addEventListener("mousedown", onMousedown, true);
-    const safety = window.setTimeout(() => {
-      popover.remove();
-      cleanup();
-    }, 30000);
+    const safety = window.setTimeout(dismiss, 30000);
 
     const cleanup = () => {
       popover.removeEventListener("mouseenter", onEnter);
-      popover.removeEventListener("mouseleave", onLeavePopover);
-      targetEl.removeEventListener("mouseleave", onLeaveTarget);
+      popover.removeEventListener("mouseleave", onLeave);
+      document.removeEventListener("mousemove", onMousemove, true);
       document.removeEventListener("mousedown", onMousedown, true);
       window.clearTimeout(safety);
+      if (dismissTimer !== null) window.clearTimeout(dismissTimer);
     };
+
+    return cleanup;
   }
 }
 
