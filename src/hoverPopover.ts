@@ -162,7 +162,9 @@ export class TypstHoverPopover {
     Object.assign(popover.style, {
       position: "absolute",
       zIndex: "9999",
+      width: "360px",
       maxWidth: "360px",
+      boxSizing: "border-box",
       padding: "10px 12px",
       background: "var(--background-primary)",
       border: "1px solid var(--background-modifier-border)",
@@ -172,6 +174,12 @@ export class TypstHoverPopover {
       lineHeight: "1.45",
       color: "var(--text-normal)",
       pointerEvents: "auto",
+      // Long unbroken strings (file paths, dates with em-dashes,
+      // origin URLs) must wrap inside the 360px box rather than
+      // pushing siblings out of the popover.
+      overflow: "hidden",
+      overflowWrap: "anywhere",
+      wordBreak: "break-word",
     });
 
     this.renderBody(popover, file, meta);
