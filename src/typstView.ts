@@ -678,6 +678,14 @@ export class TypstView extends TextFileView {
     readingDiv.style.margin = "0";
     readingDiv.style.overflow = "visible";
     readingDiv.style.boxSizing = "content-box";
+    // Center zoomInner horizontally when content is narrower than the
+    // scroller. minWidth:100% forces readingDiv to be at least as wide
+    // as its parent (the scroller's clientWidth), and text-align:center
+    // centers the inline-block zoomInner inside that extra space. When
+    // content is wider than the scroller, the explicit readingDiv
+    // style.width (set during commit) wins; centering does nothing.
+    readingDiv.style.minWidth = "100%";
+    readingDiv.style.textAlign = "center";
 
     let committedScale = 1;
     let pendingScale = 1;
@@ -773,13 +781,15 @@ export class TypstView extends TextFileView {
       if (pendingTx === 0 && pendingTy === 0 && pendingScale === committedScale) return;
 
       const scroller = findScroller();
-      const newScrollLeft = scroller.scrollLeft - pendingTx;
-      const newScrollTop = scroller.scrollTop - pendingTy;
+      // Capture zoomInner's current offset within the scroll-content
+      // frame BEFORE we change readingDiv's width. Auto-centering via
+      // text-align means this offset shifts when readingDiv resizes.
+      const preOffsetLeft = zoomInner.offsetLeft;
+      const preOffsetTop = zoomInner.offsetTop;
 
       readingDiv.style.width = naturalW * pendingScale + "px";
       readingDiv.style.height = naturalH * pendingScale + "px";
-      pendingTx = 0;
-      pendingTy = 0;
+
       if (isSvgMode()) {
         // Bake the new zoom into each SVG's CSS dimensions so the
         // browser re-paints vector primitives at the new resolution.
@@ -798,8 +808,20 @@ export class TypstView extends TextFileView {
       } else {
         zoomInner.style.transform = `scale(${pendingScale})`;
       }
-      scroller.scrollLeft = newScrollLeft;
-      scroller.scrollTop = newScrollTop;
+      // Force layout, then measure zoomInner's new offset so we can
+      // compensate the scroll math for any centering shift caused by
+      // readingDiv.style.width changing under text-align:center.
+      const postOffsetLeft = zoomInner.offsetLeft;
+      const postOffsetTop = zoomInner.offsetTop;
+      const offsetShiftX = postOffsetLeft - preOffsetLeft;
+      const offsetShiftY = postOffsetTop - preOffsetTop;
+
+      scroller.scrollLeft =
+        scroller.scrollLeft - pendingTx + offsetShiftX;
+      scroller.scrollTop =
+        scroller.scrollTop - pendingTy + offsetShiftY;
+      pendingTx = 0;
+      pendingTy = 0;
       committedScale = pendingScale;
     };
 
