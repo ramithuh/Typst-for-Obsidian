@@ -283,11 +283,26 @@ export class TypstHoverPopover {
       marginTop: "10px",
       maxHeight: `${RENDER_MAX_HEIGHT}px`,
       overflowY: "auto",
-      overflowX: "hidden",
+      overflowX: "auto",
       borderLeft: "2px solid var(--background-modifier-border)",
       paddingLeft: "8px",
       background: "var(--background-primary)",
     });
+
+    // Inner wrapper that we apply `transform: scale(N)` to for zoom.
+    // origin top-left so scrolling inside the container reaches the
+    // bottom of the scaled content; centering would push content
+    // outside the container on zoom-out.
+    const zoomInner = document.createElement("div");
+    zoomInner.className = "typst-hover-render-inner";
+    Object.assign(zoomInner.style, {
+      transformOrigin: "top left",
+      transform: "scale(1)",
+      width: "100%",
+      // Will-change avoids a paint flash when scale changes.
+      willChange: "transform",
+    });
+    container.appendChild(zoomInner);
 
     for (const svgMarkup of svgs) {
       const wrap = document.createElement("div");
@@ -302,8 +317,10 @@ export class TypstHoverPopover {
         svg.style.height = "auto";
         svg.style.display = "block";
       }
-      container.appendChild(wrap);
+      zoomInner.appendChild(wrap);
     }
+
+    this.attachRenderZoom(container, zoomInner);
 
     // Insert before the path footer (last child) so the path remains
     // pinned at the bottom of the popover for reference.
@@ -529,6 +546,60 @@ export class TypstHoverPopover {
     };
 
     return cleanup;
+  }
+
+  // Wheel-with-Cmd/Ctrl zoom for the rendered preview. Macs deliver
+  // trackpad pinch as `wheel + ctrlKey` so the same handler covers
+  // both modalities. We scale a single inner wrapper via CSS
+  // transform — fast (GPU-composited), no SVG re-rasterize (vector
+  // text stays sharp because it's vector, not because of pixel
+  // density). For a glance-preview that's the right tradeoff vs.
+  // the heavier two-phase commit pattern used by the main reader.
+  private attachRenderZoom(
+    scroller: HTMLElement,
+    zoomInner: HTMLElement,
+  ): void {
+    const MIN_ZOOM = 0.5;
+    const MAX_ZOOM = 4;
+    const WHEEL_TO_ZOOM = 0.009;
+    let scale = 1;
+
+    scroller.addEventListener(
+      "wheel",
+      (e: WheelEvent) => {
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        // Cursor-anchored zoom: keep the document point under the
+        // cursor stationary as scale changes. Compute it in the
+        // zoomInner's pre-scale coordinate space, then adjust the
+        // scroller's scroll offsets to land back at the same point.
+        const rect = zoomInner.getBoundingClientRect();
+        const localX = (e.clientX - rect.left) / scale;
+        const localY = (e.clientY - rect.top) / scale;
+
+        const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
+        const newScale = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, scale * factor),
+        );
+        if (newScale === scale) return;
+
+        scale = newScale;
+        zoomInner.style.transform = `scale(${scale})`;
+
+        // After applying the new scale, the document point that was
+        // under the cursor sits at (localX*scale, localY*scale)
+        // relative to zoomInner. The new viewport-relative cursor
+        // position is (e.clientX, e.clientY). The difference
+        // tells us how much to scroll the container.
+        const newRect = zoomInner.getBoundingClientRect();
+        const targetClientX = newRect.left + localX * scale;
+        const targetClientY = newRect.top + localY * scale;
+        scroller.scrollLeft += targetClientX - e.clientX;
+        scroller.scrollTop += targetClientY - e.clientY;
+      },
+      { passive: false },
+    );
   }
 
   // Read the file, extract a short prose snippet from past the meta
