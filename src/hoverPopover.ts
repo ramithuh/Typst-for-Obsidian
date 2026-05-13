@@ -115,6 +115,12 @@ export class TypstHoverPopover {
     this.dismissCleanup = this.attachDismiss(popover, params.event);
     this.currentPopover = popover;
     this.currentLinktext = linktext;
+
+    // Kick off async content snippet load. Vault.cachedRead resolves
+    // synchronously when the file is already in memory and from disk
+    // otherwise; either way we don't block the popover's initial paint.
+    // If the user moves away before the snippet arrives, we drop it.
+    void this.loadSnippetInto(popover, file);
   }
 
   private renderBody(
@@ -324,6 +330,147 @@ export class TypstHoverPopover {
 
     return cleanup;
   }
+
+  // Read the file, extract a short prose snippet from past the meta
+  // boilerplate, and append it to the popover ABOVE the path footer.
+  // Bails out if the popover has already been dismissed by the time
+  // the async read resolves (currentPopover is the source of truth).
+  private async loadSnippetInto(
+    popover: HTMLElement,
+    file: TFile,
+  ): Promise<void> {
+    let content: string;
+    try {
+      content = await this.plugin.app.vault.cachedRead(file);
+    } catch {
+      return;
+    }
+    if (this.currentPopover !== popover || !popover.isConnected) return;
+
+    const snippet = extractSnippet(content);
+    if (!snippet) return;
+
+    const snippetEl = document.createElement("div");
+    Object.assign(snippetEl.style, {
+      marginTop: "10px",
+      paddingLeft: "8px",
+      borderLeft: "2px solid var(--background-modifier-border)",
+      fontSize: "12px",
+      color: "var(--text-normal)",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      maxHeight: "160px",
+      overflow: "hidden",
+    });
+    snippetEl.textContent = snippet;
+
+    // Insert before the path footer (always the last child after
+    // renderBody finishes). If popover layout changed, fall back to
+    // appending — better than throwing.
+    const pathEl = popover.lastElementChild;
+    if (pathEl) popover.insertBefore(snippetEl, pathEl);
+    else popover.appendChild(snippetEl);
+  }
+}
+
+// Pull a short prose preview out of a .typ note's source. Strips:
+//   - the `#let meta = (...)` block, if present
+//   - the immediate `#note-header(meta)` call
+//   - the H1 line (`= Title <slug>`) — we already render the title above
+//   - lone Typst directive lines (#import, #set, #show) that aren't
+//     part of the visible prose
+// Then takes up to MAX_LINES non-empty lines or MAX_CHARS, whichever
+// comes first. Returns null when nothing usable is left.
+function extractSnippet(content: string): string | null {
+  const MAX_LINES = 6;
+  const MAX_CHARS = 360;
+
+  // 1. Skip past `#let meta = ( ... )` block if present.
+  let body = stripMetaBlock(content);
+
+  // 2. Drop `#note-header(meta)` invocation.
+  body = body.replace(/^\s*#note-header\([^)]*\)\s*$/m, "");
+
+  // 3. Drop the first H1 line (and a possible label `<slug>` on it).
+  body = body.replace(/^\s*=\s+[^\n]*\n/, "");
+
+  // 4. Walk lines and collect prose.
+  const lines = body.split(/\r?\n/);
+  const out: string[] = [];
+  let chars = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "") {
+      if (out.length === 0) continue; // skip leading blanks
+      out.push("");
+      continue;
+    }
+    // Skip Typst configuration / import / show directives — these are
+    // boilerplate, not the content the user wants to preview.
+    if (/^#(?:import|set|show|let|include)\b/.test(line)) continue;
+    if (/^\/\//.test(line)) continue; // comments
+
+    out.push(line);
+    chars += line.length + 1;
+    if (out.length >= MAX_LINES || chars >= MAX_CHARS) break;
+  }
+
+  // Trim trailing blank lines.
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  if (out.length === 0) return null;
+
+  let snippet = out.join("\n");
+  if (snippet.length > MAX_CHARS) snippet = snippet.slice(0, MAX_CHARS - 1) + "…";
+  return snippet;
+}
+
+// Find the `#let meta = (...)` block and return content with that
+// block removed. Tracks paren / brace / string depth so the meta
+// block's commas don't confuse the trimming.
+function stripMetaBlock(content: string): string {
+  const re = /#let\s+meta\s*=\s*\(/;
+  const m = re.exec(content);
+  if (!m) return content;
+  const headStart = m.index;
+  const valueStart = m.index + m[0].length;
+
+  let depth = 1;
+  let inString = false;
+  let stringQuote = '"';
+  let escape = false;
+  for (let i = valueStart; i < content.length; i++) {
+    const c = content[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === "\\") {
+        escape = true;
+        continue;
+      }
+      if (c === stringQuote) inString = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringQuote = c;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) {
+        // Include trailing newline (and any whitespace) after the
+        // closing paren so we don't leave a blank line in its place.
+        let end = i + 1;
+        while (end < content.length && /[ \t]/.test(content[end])) end++;
+        if (end < content.length && content[end] === "\n") end++;
+        return content.slice(0, headStart) + content.slice(end);
+      }
+    }
+  }
+  return content; // unbalanced — leave as-is
 }
 
 function statusBackground(status: string): string {
