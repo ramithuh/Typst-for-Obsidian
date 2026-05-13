@@ -548,13 +548,23 @@ export class TypstHoverPopover {
     return cleanup;
   }
 
-  // Wheel-with-Cmd/Ctrl zoom for the rendered preview. Macs deliver
-  // trackpad pinch as `wheel + ctrlKey` so the same handler covers
-  // both modalities. We scale a single inner wrapper via CSS
-  // transform — fast (GPU-composited), no SVG re-rasterize (vector
-  // text stays sharp because it's vector, not because of pixel
-  // density). For a glance-preview that's the right tradeoff vs.
-  // the heavier two-phase commit pattern used by the main reader.
+  // Wheel-with-Cmd/Ctrl + trackpad-pinch zoom for the rendered
+  // preview, two-phase like the main reader so the SVG re-rasterizes
+  // crisply at the committed zoom level:
+  //
+  //   1. During the gesture: scale a single inner wrapper via CSS
+  //      transform (GPU-composited, no layout reflow), and apply a
+  //      cursor-anchored translate so the point under the cursor
+  //      stays under the cursor as the user zooms.
+  //   2. ~150ms after the last wheel event: commit. Reset the
+  //      transform, set zoomInner's layout width to baseW * scale.
+  //      The SVGs (width: 100% inside zoomInner) reflow at the new
+  //      dimensions and the browser re-rasterizes them as vector
+  //      content at the higher resolution — crisp at any zoom level.
+  //
+  // Sequence math is the same as typstView.ts::attachPreviewZoom but
+  // simplified: no padding outside the transform, no recompile-time
+  // observer, no per-page dimensions to track.
   private attachRenderZoom(
     scroller: HTMLElement,
     zoomInner: HTMLElement,
@@ -562,41 +572,84 @@ export class TypstHoverPopover {
     const MIN_ZOOM = 0.5;
     const MAX_ZOOM = 4;
     const WHEEL_TO_ZOOM = 0.009;
-    let scale = 1;
+    const COMMIT_DELAY_MS = 150;
+
+    zoomInner.style.transformOrigin = "0 0";
+
+    let baseW = 0;
+    let committedScale = 1;
+    let pendingScale = 1;
+    let pendingTx = 0;
+    let pendingTy = 0;
+    let commitTimer: number | null = null;
+
+    // Lock zoomInner to a fixed pixel width on first interaction so
+    // post-commit layout-width changes are reliable (width: 100%
+    // would resist explicit pixel overrides on some browsers).
+    const ensureBaseW = () => {
+      if (baseW) return;
+      baseW = zoomInner.offsetWidth;
+      if (baseW) zoomInner.style.width = `${baseW}px`;
+    };
+
+    const applyTransform = () => {
+      const rel = pendingScale / (committedScale || 1);
+      zoomInner.style.transform =
+        `translate(${pendingTx}px, ${pendingTy}px) scale(${rel})`;
+    };
+
+    const stepZoom = (
+      newScale: number,
+      clientX: number,
+      clientY: number,
+    ) => {
+      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newScale));
+      const oldRel = pendingScale / (committedScale || 1);
+      const newRel = clamped / (committedScale || 1);
+      const rect = zoomInner.getBoundingClientRect();
+      const worldX = (clientX - rect.left) / oldRel;
+      const worldY = (clientY - rect.top) / oldRel;
+      pendingTx += clientX - worldX * newRel - rect.left;
+      pendingTy += clientY - worldY * newRel - rect.top;
+      pendingScale = clamped;
+      applyTransform();
+    };
+
+    const commit = () => {
+      commitTimer = null;
+      if (!baseW) return;
+      // Capture pre-commit position so we can compensate for any
+      // shift the scroller introduces when zoomInner's layout box
+      // grows (centering / margin changes).
+      const preLeft = zoomInner.offsetLeft;
+      const preTop = zoomInner.offsetTop;
+      zoomInner.style.transform = "";
+      zoomInner.style.width = `${baseW * pendingScale}px`;
+      const postLeft = zoomInner.offsetLeft;
+      const postTop = zoomInner.offsetTop;
+      scroller.scrollLeft =
+        scroller.scrollLeft - pendingTx + (postLeft - preLeft);
+      scroller.scrollTop =
+        scroller.scrollTop - pendingTy + (postTop - preTop);
+      pendingTx = 0;
+      pendingTy = 0;
+      committedScale = pendingScale;
+    };
+
+    const scheduleCommit = () => {
+      if (commitTimer !== null) window.clearTimeout(commitTimer);
+      commitTimer = window.setTimeout(commit, COMMIT_DELAY_MS);
+    };
 
     scroller.addEventListener(
       "wheel",
       (e: WheelEvent) => {
         if (!e.ctrlKey && !e.metaKey) return;
         e.preventDefault();
-        // Cursor-anchored zoom: keep the document point under the
-        // cursor stationary as scale changes. Compute it in the
-        // zoomInner's pre-scale coordinate space, then adjust the
-        // scroller's scroll offsets to land back at the same point.
-        const rect = zoomInner.getBoundingClientRect();
-        const localX = (e.clientX - rect.left) / scale;
-        const localY = (e.clientY - rect.top) / scale;
-
+        ensureBaseW();
         const factor = 1 - e.deltaY * WHEEL_TO_ZOOM;
-        const newScale = Math.min(
-          MAX_ZOOM,
-          Math.max(MIN_ZOOM, scale * factor),
-        );
-        if (newScale === scale) return;
-
-        scale = newScale;
-        zoomInner.style.transform = `scale(${scale})`;
-
-        // After applying the new scale, the document point that was
-        // under the cursor sits at (localX*scale, localY*scale)
-        // relative to zoomInner. The new viewport-relative cursor
-        // position is (e.clientX, e.clientY). The difference
-        // tells us how much to scroll the container.
-        const newRect = zoomInner.getBoundingClientRect();
-        const targetClientX = newRect.left + localX * scale;
-        const targetClientY = newRect.top + localY * scale;
-        scroller.scrollLeft += targetClientX - e.clientX;
-        scroller.scrollTop += targetClientY - e.clientY;
+        stepZoom(pendingScale * factor, e.clientX, e.clientY);
+        scheduleCommit();
       },
       { passive: false },
     );
