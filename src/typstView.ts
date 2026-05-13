@@ -664,21 +664,20 @@ export class TypstView extends TextFileView {
     zoomInner.style.transformOrigin = "0 0";
     zoomInner.style.willChange = "transform";
     // display:inline-block makes zoomInner shrink-to-fit its content
-    // instead of expanding to readingDiv's full width. That makes
-    // `scrollWidth` reflect the actual page width rather than the
-    // viewport width, so readingDiv's width-after-zoom doesn't leave
-    // an empty band of background to the right of the content.
+    // instead of expanding to readingDiv's full width, so scrollWidth
+    // reflects the actual page width.
     zoomInner.style.display = "inline-block";
-    zoomInner.style.padding = "24px";
-    zoomInner.style.boxSizing = "border-box";
-    // Strip readingDiv's padding/margin so zoomInner sits at (0,0)
-    // of readingDiv (the scroll-content frame's origin).
-    readingDiv.style.padding = "0";
+    // Visual breathing room around the pages lives on readingDiv
+    // (OUTSIDE the transformed coordinate frame). Padding inside
+    // zoomInner would scale visually during the gesture but stay at
+    // its literal CSS value at commit (when transform resets and
+    // SVGs resize), introducing a ~24px×(rel−1) settle-time offset.
+    zoomInner.style.padding = "0";
+    zoomInner.style.margin = "0";
+    readingDiv.style.padding = "24px";
     readingDiv.style.margin = "0";
-    // Vertical-only overflow on readingDiv lets the horizontal scroll
-    // bar live on the outer scroller (contentEl) rather than appearing
-    // unnecessarily here.
     readingDiv.style.overflow = "visible";
+    readingDiv.style.boxSizing = "content-box";
 
     let committedScale = 1;
     let pendingScale = 1;
