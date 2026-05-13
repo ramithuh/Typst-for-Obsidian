@@ -44,6 +44,11 @@ export class TypstHoverPopover {
   private currentPopover: HTMLElement | null = null;
   private currentLinktext: string | null = null;
   private dismissCleanup: (() => void) | null = null;
+  // MutationObserver that watches for Obsidian's stock empty popover
+  // (created by the "Page preview" core plugin's listener on the same
+  // hover-link event) and removes it. Only active while one of our
+  // popovers is on screen.
+  private suppressObserver: MutationObserver | null = null;
   // Stabilization timer for the rendered preview. Cancelled whenever
   // the popover is dismissed or replaced with a different node's
   // popover; only fires if the user really has paused on a node.
@@ -100,11 +105,40 @@ export class TypstHoverPopover {
       this.dismissCleanup();
       this.dismissCleanup = null;
     }
+    if (this.suppressObserver) {
+      this.suppressObserver.disconnect();
+      this.suppressObserver = null;
+    }
     if (this.currentPopover) {
       this.currentPopover.remove();
       this.currentPopover = null;
     }
     this.currentLinktext = null;
+  }
+
+  // Start watching the document for Obsidian's stock hover-popover
+  // element (any node with the `hover-popover` class that isn't ours)
+  // and remove it on sight. Page preview's listener also fires on the
+  // same hover-link event we consume, so without this we get a double
+  // popover when the user holds the page-preview modifier (Cmd).
+  private startSuppressingNativePopover(): void {
+    if (this.suppressObserver) this.suppressObserver.disconnect();
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of Array.from(m.addedNodes)) {
+          if (!(node instanceof HTMLElement)) continue;
+          if (node === this.currentPopover) continue;
+          if (
+            node.classList.contains("hover-popover") &&
+            !node.classList.contains("typst-hover-popover")
+          ) {
+            node.remove();
+          }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    this.suppressObserver = observer;
   }
 
   private lookupMeta(path: string): NoteMeta | undefined {
@@ -145,6 +179,9 @@ export class TypstHoverPopover {
     this.dismissCleanup = this.attachDismiss(popover, params.event);
     this.currentPopover = popover;
     this.currentLinktext = linktext;
+    // Suppress Obsidian's stock empty hover popover (fired by the
+    // "Page preview" core plugin on the same event) while ours is up.
+    this.startSuppressingNativePopover();
 
     // Kick off async content snippet load. Vault.cachedRead resolves
     // synchronously when the file is already in memory and from disk
