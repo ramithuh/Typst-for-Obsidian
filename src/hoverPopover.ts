@@ -231,15 +231,25 @@ export class TypstHoverPopover {
 
   // Dismiss policy (canvas-rendered nodes have no DOM mouseleave):
   //   - mousedown outside the popover → dismiss immediately
-  //   - mousemove that's > 80px from the popover bounds AND not over
-  //     the popover itself → dismiss after a short grace period
+  //   - mousemove that's > DISMISS_RADIUS from the original cursor
+  //     position AND not over the popover itself → dismiss after a
+  //     short grace period
   //   - 30s safety timeout in case the cursor goes idle
-  // While the cursor is INSIDE the popover, dismissal is paused so
-  // the user can read longer fields (e.g. origin) without it vanishing.
+  // Anchoring to the original cursor position (rather than the
+  // popover's bounding rect) keeps the dismiss zone size-independent,
+  // so small popovers (e.g. files without meta blocks) get the same
+  // grace period as content-rich ones.
+  //
+  // The cursor entering the popover pauses dismissal so the user can
+  // read longer fields (e.g. origin) without it vanishing.
   private attachDismiss(
     popover: HTMLElement,
     event?: MouseEvent,
   ): () => void {
+    const DISMISS_RADIUS = 120;
+    const anchorX = event?.clientX ?? 0;
+    const anchorY = event?.clientY ?? 0;
+
     let insidePopover = false;
     let dismissTimer: number | null = null;
 
@@ -275,12 +285,23 @@ export class TypstHoverPopover {
     };
     const onMousemove = (e: MouseEvent) => {
       if (insidePopover) return;
+      // If the cursor is over the popover, treat as "still hovering."
+      // Avoids racing the mouseenter handler if events arrive in an
+      // unexpected order.
       const rect = popover.getBoundingClientRect();
-      const dx = Math.max(rect.left - e.clientX, e.clientX - rect.right, 0);
-      const dy = Math.max(rect.top - e.clientY, e.clientY - rect.bottom, 0);
-      // Distance from the popover edge in either axis. Once we're far
-      // enough from both popover and the original node, allow dismiss.
-      if (dx > 80 || dy > 80) scheduleDismiss(200);
+      if (
+        e.clientX >= rect.left &&
+        e.clientX <= rect.right &&
+        e.clientY >= rect.top &&
+        e.clientY <= rect.bottom
+      ) {
+        cancelDismiss();
+        return;
+      }
+      // Otherwise gauge distance from the *original* hover anchor.
+      const dist = Math.hypot(e.clientX - anchorX, e.clientY - anchorY);
+      if (dist > DISMISS_RADIUS) scheduleDismiss(250);
+      else cancelDismiss();
     };
     const onMousedown = (e: MouseEvent) => {
       if (!popover.contains(e.target as Node)) dismiss();
