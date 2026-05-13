@@ -715,26 +715,31 @@ export class TypstView extends TextFileView {
       return readingDiv;
     };
 
+    // The transform on zoomInner stacks on top of any zoom that's
+    // already baked into the SVG sizes from previous commits. So the
+    // scale we apply via transform is RELATIVE to committedScale,
+    // not absolute. Same for the cursor math: rect.left already
+    // reflects rel × (base × committedScale), so worldX divides by
+    // rel, not pendingScale.
     const applyTransform = () => {
-      zoomInner.style.transform = `translate(${pendingTx}px, ${pendingTy}px) scale(${pendingScale})`;
+      const rel = pendingScale / (committedScale || 1);
+      zoomInner.style.transform = `translate(${pendingTx}px, ${pendingTy}px) scale(${rel})`;
     };
 
     const stepZoom = (newScale: number, clientX: number, clientY: number) => {
       const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newScale));
-      // Use the live bounding rect (post-transform position of
-      // zoomInner's pre-transform origin = rect.left - pendingTx).
-      // The world point (zoomInner-local, pre-transform) under the
-      // cursor is (clientX - rect.left) / pendingScale.
+      const oldRel = pendingScale / (committedScale || 1);
+      const newRel = clamped / (committedScale || 1);
       const rect = zoomInner.getBoundingClientRect();
-      const worldX = (clientX - rect.left) / pendingScale;
-      const worldY = (clientY - rect.top) / pendingScale;
-      // Goal: at the new scale, the same world point should sit under
-      // the cursor again ⇒ new rect.left = clientX − worldX × newScale.
-      // newTx = pendingTx + (newRectLeft − rect.left), since
-      // newRectLeft − rect.left = newTx − pendingTx (translate is in
-      // viewport units in the `translate(tx) scale(s)` form we use).
-      pendingTx += clientX - worldX * clamped - rect.left;
-      pendingTy += clientY - worldY * clamped - rect.top;
+      // World point under cursor, in zoomInner's pre-transform local
+      // frame. (Units: base × committedScale CSS pixels.)
+      const worldX = (clientX - rect.left) / oldRel;
+      const worldY = (clientY - rect.top) / oldRel;
+      // Want: new rect.left = clientX − worldX × newRel.
+      // newTx − pendingTx = newRect.left − rect.left = (clientX −
+      // worldX × newRel) − rect.left.
+      pendingTx += clientX - worldX * newRel - rect.left;
+      pendingTy += clientY - worldY * newRel - rect.top;
       pendingScale = clamped;
       applyTransform();
     };
