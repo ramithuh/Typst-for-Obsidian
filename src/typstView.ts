@@ -657,7 +657,7 @@ export class TypstView extends TextFileView {
   private attachPreviewZoom(readingDiv: HTMLElement): void {
     const MIN_ZOOM = 0.25;
     const MAX_ZOOM = 4;
-    const WHEEL_TO_ZOOM = 0.0035;
+    const WHEEL_TO_ZOOM = 0.009;
     const COMMIT_DELAY_MS = 150;
 
     const zoomInner = this.ensureZoomInner(readingDiv);
