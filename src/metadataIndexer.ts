@@ -9,12 +9,21 @@ import { Plugin, TFile, TAbstractFile } from "obsidian";
 //   #import "path.typ": ...
 //   #link("./path.typ")    (relative vault paths only)
 //   @citationKey           (mapped to the .bib file that defines it)
+//
+// Also extracts the `#let meta = (...)` metadata block (see
+// knowledge-base convention) and exposes `tagsByPath` so the graph
+// view's color injection can derive a stable color per category.
 export class MetadataIndexer {
   private plugin: Plugin;
   // citation key -> vault path of the .bib file defining it. Populated
   // by indexBib() and refreshed when any .bib changes. Used so that a
   // `@key` in a .typ source can be wired to its bib's graph node.
   private bibKeyToPath: Map<string, string> = new Map();
+  // .typ path -> ordered list of tags from `#let meta = (...)`. First
+  // entry is the category by convention. Empty array means we parsed
+  // the file but found no meta block (or no tags); missing key means
+  // the file was never indexed. Consumed by graphColoring.ts.
+  public tagsByPath: Map<string, string[]> = new Map();
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -106,6 +115,12 @@ export class MetadataIndexer {
       for (const key of this.extractCitedKeys(content)) {
         unresolved[key] = (unresolved[key] || 0) + 1;
       }
+      const tags = this.extractMetaTags(content);
+      if (tags.length > 0) {
+        this.tagsByPath.set(file.path, tags);
+      } else {
+        this.tagsByPath.delete(file.path);
+      }
     } else if (file.extension === "bib") {
       // The bib file itself "links to" each entry it defines, so the
       // entry node and the bib hub appear connected in the graph.
@@ -145,6 +160,7 @@ export class MetadataIndexer {
     if (cache.unresolvedLinks) {
       delete cache.unresolvedLinks[path];
     }
+    this.tagsByPath.delete(path);
     this.plugin.app.metadataCache.trigger("resolved");
   }
 
@@ -164,6 +180,10 @@ export class MetadataIndexer {
           delete links[oldPath];
         }
       }
+    }
+    if (this.tagsByPath.has(oldPath)) {
+      this.tagsByPath.set(file.path, this.tagsByPath.get(oldPath)!);
+      this.tagsByPath.delete(oldPath);
     }
 
     if (file instanceof TFile && file.extension === "typ") {
@@ -211,6 +231,134 @@ export class MetadataIndexer {
     let m;
     while ((m = citeRe.exec(content)) !== null) {
       if (this.bibKeyToPath.has(m[1])) out.push(m[1]);
+    }
+    return out;
+  }
+
+  // Extract the `tags: (...)` tuple from a `#let meta = ( ... )` block.
+  // Returns the tags in declaration order, or [] if no meta block is
+  // found, no tags field is present, or parsing fails. Deliberately
+  // permissive: we only need the first tag (the category) to be correct
+  // for color routing; extra tags after that are bonus metadata.
+  //
+  // The block contents can be arbitrary Typst — strings with escapes,
+  // nested tuples, prose with commas — so we scan brace/paren depth and
+  // string state rather than splitting on commas. For the `tags` value
+  // we expect a parenthesized list of double-quoted strings, which is
+  // both what _template.typ documents and what every existing note uses.
+  private extractMetaTags(content: string): string[] {
+    const start = this.findMetaBlockStart(content);
+    if (start < 0) return [];
+    const inner = this.extractBalancedParens(content, start);
+    if (inner === null) return [];
+
+    const tagsValue = this.findFieldValue(inner, "tags");
+    if (tagsValue === null) return [];
+    return this.parseStringTuple(tagsValue);
+  }
+
+  // Locate the index *immediately after* the opening `(` of `#let meta = (`.
+  // Tolerates extra whitespace around `=` and accepts either `meta` or `meta:`
+  // (defensive — current convention is just `meta`). Returns -1 if absent.
+  private findMetaBlockStart(content: string): number {
+    const re = /#let\s+meta\s*=\s*\(/;
+    const m = re.exec(content);
+    return m ? m.index + m[0].length : -1;
+  }
+
+  // Given a starting index just past `(`, scan to the matching close
+  // paren and return everything between, or null if unbalanced/eof.
+  // Tracks string state to ignore parens inside string literals.
+  private extractBalancedParens(content: string, start: number): string | null {
+    let depth = 1;
+    let inString = false;
+    let stringQuote = '"';
+    let escape = false;
+    for (let i = start; i < content.length; i++) {
+      const c = content[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (c === "\\") {
+          escape = true;
+          continue;
+        }
+        if (c === stringQuote) inString = false;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        inString = true;
+        stringQuote = c;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")") {
+        depth--;
+        if (depth === 0) return content.slice(start, i);
+      }
+    }
+    return null;
+  }
+
+  // Find the value of `<field>:` inside a tuple body. Returns the raw
+  // value text (trimmed) up to the next top-level comma or end. Handles
+  // string literals and nested parens correctly. Returns null if the
+  // field is not present at the top level.
+  private findFieldValue(body: string, field: string): string | null {
+    const re = new RegExp(`(?:^|,)\\s*${field}\\s*:\\s*`);
+    const m = re.exec(body);
+    if (!m) return null;
+    const start = m.index + m[0].length;
+
+    let depth = 0;
+    let inString = false;
+    let stringQuote = '"';
+    let escape = false;
+    for (let i = start; i < body.length; i++) {
+      const c = body[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (c === "\\") {
+          escape = true;
+          continue;
+        }
+        if (c === stringQuote) inString = false;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        inString = true;
+        stringQuote = c;
+        continue;
+      }
+      if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") depth--;
+      else if (c === "," && depth === 0) {
+        return body.slice(start, i).trim();
+      }
+    }
+    return body.slice(start).trim();
+  }
+
+  // Parse a `("a", "b", "c",)` tuple body into ["a", "b", "c"]. The
+  // outer parens are optional (we accept either with or without). Only
+  // double-quoted strings are extracted; anything else is skipped, which
+  // means single-element tuples like `("x",)` work fine and stray
+  // numerics or identifiers are ignored.
+  private parseStringTuple(raw: string): string[] {
+    let s = raw.trim();
+    if (s.startsWith("(") && s.endsWith(")")) {
+      s = s.slice(1, -1);
+    }
+    const out: string[] = [];
+    const re = /"((?:[^"\\]|\\.)*)"/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      out.push(m[1].replace(/\\(.)/g, "$1"));
     }
     return out;
   }

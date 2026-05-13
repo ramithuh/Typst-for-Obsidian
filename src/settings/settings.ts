@@ -88,6 +88,16 @@ export interface TypstSettings {
   // Apply graph-view color groups to .typ files (Obsidian core skips them
   // because they're classified as attachments; we monkey-patch around it)
   enableTypstGraphColoring: boolean;
+  // Auto-color .typ graph nodes by their first meta tag (= category, by
+  // convention in _template.typ). Categories not explicitly mapped via
+  // `categoryColors` fall back to a stable hash-derived HSL color so
+  // notes in the same category always share a hue across sessions.
+  enableAutoCategoryColor: boolean;
+  // Manual category -> hex color overrides. Keys are category names
+  // (the first meta tag); values are hex strings like "#27ae60". Used
+  // when the auto-derived palette picks an unappealing color. Categories
+  // not present here fall through to the hash palette.
+  categoryColors: Record<string, string>;
   // Preview renderer: "pdf" (PDFium-rasterized bitmap, current default) or
   // "svg" (typst-svg vector output, native smooth zoom in the browser).
   previewRenderer: "pdf" | "svg";
@@ -128,6 +138,8 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   sourceToPreviewSyncDebounce: 120,
   autoRecompileOnDependencyChange: true,
   enableTypstGraphColoring: true,
+  enableAutoCategoryColor: true,
+  categoryColors: {},
   previewRenderer: "svg",
   bibNotesFolder: "papers",
   crossFileJumpTarget: "sibling-pane-or-tab",

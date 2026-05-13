@@ -180,25 +180,41 @@ export class GraphColoringPatch {
     const nodes = data?.nodes;
     if (!nodes || typeof nodes !== "object") return;
     const groups: ColorGroup[] = eng.searchQueries || [];
-    if (groups.length === 0) return;
+    const settings = (this.plugin as any).settings;
+    const autoColor: boolean = !!settings?.enableAutoCategoryColor;
+    const overrides: Record<string, string> = settings?.categoryColors || {};
+
+    // If there are zero user-defined color groups AND auto-color is off,
+    // there's nothing for us to do. Otherwise we still need to iterate
+    // because auto-color can apply even without any user groups.
+    if (groups.length === 0 && !autoColor) return;
 
     for (const path of Object.keys(nodes)) {
       if (!path.endsWith(`.${TARGET_EXT}`)) continue;
       const file = this.plugin.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
 
-      const matched = this.firstMatchingGroup(file, groups);
-      if (!matched) continue;
-      const rgb = matched.color?.rgb;
-      if (typeof rgb !== "number") continue;
-
       const entry = nodes[path];
       if (!entry || typeof entry !== "object") continue;
+
+      // Resolution chain:
+      //   1. user-defined color group whose query matches the file.
+      //   2. auto-color from the file's category (first meta tag, or
+      //      parent folder name as a fallback when no meta block).
+      let rgb: number | null = null;
+      const matched = this.firstMatchingGroup(file, groups);
+      if (matched && typeof matched.color?.rgb === "number") {
+        rgb = matched.color.rgb;
+      } else if (autoColor) {
+        const category = this.deriveCategory(path);
+        if (category) rgb = colorForCategory(category, overrides);
+      }
+      if (rgb === null) continue;
 
       // The renderer's worker treats nodes with `type: ""` as ordinary
       // notes (eligible for group color); `type: "attachment"` forces
       // the global "fillAttachment" color and ignores group queries.
-      // We override the type so the worker picks up our group color.
+      // We override the type so the worker picks up our chosen color.
       // Save the original in case any other code path needs it.
       (entry as any)._origType = (entry as any).type;
       (entry as any).type = "";
@@ -219,6 +235,83 @@ export class GraphColoringPatch {
     }
     return null;
   }
+
+  // Pick a category string for a .typ path:
+  //   1. tags[0] from the parsed `#let meta = (...)` block, if any.
+  //   2. parent folder's basename (since folder ≈ category by the
+  //      knowledge-base convention) as a fallback for legacy notes
+  //      without a meta block.
+  // Returns null when both are empty (file at vault root, no meta).
+  private deriveCategory(path: string): string | null {
+    const indexer = (this.plugin as any).metadataIndexer;
+    const tags: string[] | undefined = indexer?.tagsByPath?.get(path);
+    if (tags && tags.length > 0 && tags[0]) return tags[0];
+
+    const slash = path.lastIndexOf("/");
+    if (slash < 0) return null;
+    const dir = path.slice(0, slash);
+    const lastSeg = dir.slice(dir.lastIndexOf("/") + 1);
+    return lastSeg || null;
+  }
+}
+
+// Resolve a category name to a 24-bit packed RGB number suitable for
+// Obsidian's renderer worker. User-pinned overrides win; otherwise the
+// hash-derived HSL palette gives a deterministic per-category color.
+function colorForCategory(
+  category: string,
+  overrides: Record<string, string>,
+): number {
+  const pinned = overrides[category];
+  if (typeof pinned === "string") {
+    const rgb = parseHexRgb(pinned);
+    if (rgb !== null) return rgb;
+  }
+  // Deterministic hash → hue. Fixed S/L keeps the palette visually
+  // consistent (no garish max-saturation oranges next to washed-out
+  // pastels) and ensures the same category always lands the same color
+  // across sessions and machines.
+  const hue = hashString(category) % 360;
+  return hslToRgb(hue, 0.55, 0.55);
+}
+
+// Parse "#rrggbb" or "rrggbb" into a packed 24-bit RGB number. Returns
+// null on malformed input so the caller can fall through to the hash.
+function parseHexRgb(hex: string): number | null {
+  const s = hex.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+  return parseInt(s, 16);
+}
+
+// FNV-1a 32-bit hash. Returns an unsigned int.
+function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h >>> 0;
+}
+
+// Convert HSL (h in [0,360), s and l in [0,1]) to a packed 24-bit RGB.
+function hslToRgb(h: number, s: number, l: number): number {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0,
+    g = 0,
+    b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  const R = Math.round((r + m) * 255);
+  const G = Math.round((g + m) * 255);
+  const B = Math.round((b + m) * 255);
+  return (R << 16) | (G << 8) | B;
 }
 
 // Open or create a paper-note .typ for a citation key. Idempotent: if

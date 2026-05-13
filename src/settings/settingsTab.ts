@@ -351,6 +351,42 @@ export class TypstSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Auto-color graph nodes by category")
+      .setDesc(
+        "Color each .typ graph node by its first meta tag (the 'category' by knowledge-base convention). Notes without a meta block fall back to their parent folder name. User-defined color groups still take precedence where they match.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableAutoCategoryColor)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.enableAutoCategoryColor = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Category color overrides")
+      .setDesc(
+        'JSON map of category name to hex color, used by auto-coloring when the hash-derived palette picks an unappealing color. Example: {"evaluation":"#27ae60","related_work":"#3498db"}. Categories not in this map use the auto palette.',
+      )
+      .addTextArea((text) =>
+        text
+          .setPlaceholder('{"evaluation":"#27ae60"}')
+          .setValue(JSON.stringify(this.plugin.settings.categoryColors || {}))
+          .onChange(async (value: string) => {
+            try {
+              const parsed = JSON.parse(value || "{}");
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                this.plugin.settings.categoryColors = parsed;
+                await this.plugin.saveSettings();
+              }
+            } catch {
+              // Ignore mid-typing parse errors; commit only when valid.
+            }
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Bib notes folder")
       .setDesc(
         "When you click a bib-entry node in graph view, the plugin opens or creates a .typ note for that entry inside this folder (e.g. \"papers\"/krizhevsky2014one.typ).",
