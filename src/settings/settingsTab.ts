@@ -351,6 +351,20 @@ export class TypstSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Hide underscore-prefixed paths from graph")
+      .setDesc(
+        "Exclude .typ files whose path contains any segment starting with `_` (e.g. _template.typ, _new.typ, _drafts/foo.typ) from the graph view. Edges from indexed notes to these files are also dropped so the graph doesn't accumulate phantom links.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.excludeUnderscorePrefixed)
+          .onChange(async (value: boolean) => {
+            this.plugin.settings.excludeUnderscorePrefixed = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Auto-color graph nodes by category")
       .setDesc(
         "Color each .typ graph node by its first meta tag (the 'category' by knowledge-base convention). Notes without a meta block fall back to their parent folder name. User-defined color groups still take precedence where they match.",

@@ -102,7 +102,22 @@ export class MetadataIndexer {
     }
   }
 
+  // Path is "hidden" if any of its `/`-separated segments starts with
+  // `_`. Convention: such files are templates, scratch, or build glue
+  // (`_template.typ`, `_new.typ`, `_drafts/foo.typ`) and should not
+  // appear in the graph or be linked to from indexed notes.
+  isHidden(path: string): boolean {
+    if (!(this.plugin as any).settings?.excludeUnderscorePrefixed) return false;
+    return path.split("/").some((seg) => seg.startsWith("_"));
+  }
+
   async indexFile(file: TFile): Promise<void> {
+    if (this.isHidden(file.path)) {
+      // Belt-and-suspenders: drop any stale state from before this
+      // file was renamed into hidden territory, then bail.
+      this.removeFile(file.path);
+      return;
+    }
     const content = await this.plugin.app.vault.cachedRead(file);
 
     const resolved: Record<string, number> = {};
@@ -399,6 +414,10 @@ export class MetadataIndexer {
     if (!normalized) return null;
 
     const file = this.plugin.app.vault.getAbstractFileByPath(normalized);
-    return file ? normalized : null;
+    if (!file) return null;
+    // Don't link to hidden files (templates, scratch). Edge would
+    // create a phantom graph node we'd then have to delete in setData.
+    if (this.isHidden(normalized)) return null;
+    return normalized;
   }
 }

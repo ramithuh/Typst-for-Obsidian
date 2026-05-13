@@ -98,6 +98,11 @@ export interface TypstSettings {
   // when the auto-derived palette picks an unappealing color. Categories
   // not present here fall through to the hash palette.
   categoryColors: Record<string, string>;
+  // Hide files/folders whose path contains a segment starting with `_`
+  // from the graph view (e.g. `_template.typ`, `_new.typ`, `_drafts/`).
+  // These are typically templates or scratch files we don't want
+  // cluttering the graph. Also prevents edges from linking to them.
+  excludeUnderscorePrefixed: boolean;
   // Preview renderer: "pdf" (PDFium-rasterized bitmap, current default) or
   // "svg" (typst-svg vector output, native smooth zoom in the browser).
   previewRenderer: "pdf" | "svg";
@@ -140,6 +145,7 @@ export const DEFAULT_SETTINGS: TypstSettings = {
   enableTypstGraphColoring: true,
   enableAutoCategoryColor: true,
   categoryColors: {},
+  excludeUnderscorePrefixed: true,
   previewRenderer: "svg",
   bibNotesFolder: "papers",
   crossFileJumpTarget: "sibling-pane-or-tab",

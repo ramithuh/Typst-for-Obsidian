@@ -23,6 +23,17 @@ const SENTINEL_QUERY = "_typstGraphPatched";
 const SENTINEL_RENDERER = "_typstGraphRendererPatched";
 const TARGET_EXT = "typ";
 
+// Process tags override the file's category (tags[0]) for color routing.
+// Order is precedence: needs_review wins over agent_drafted if both
+// appear on the same note. needs_review is intentionally loud (red)
+// because it represents an actionable triage state; agent_drafted is
+// a quieter provenance flag (purple) that stays on the note forever.
+const PROCESS_TAGS = ["needs_review", "agent_drafted"];
+const DEFAULT_PROCESS_COLORS: Record<string, string> = {
+  needs_review: "#e74c3c",
+  agent_drafted: "#9b59b6",
+};
+
 export class GraphColoringPatch {
   private plugin: Plugin;
 
@@ -183,6 +194,17 @@ export class GraphColoringPatch {
     const settings = (this.plugin as any).settings;
     const autoColor: boolean = !!settings?.enableAutoCategoryColor;
     const overrides: Record<string, string> = settings?.categoryColors || {};
+    const indexer = (this.plugin as any).metadataIndexer;
+
+    // First pass: drop hidden nodes (paths with any `_`-prefixed
+    // segment). The indexer already skips them when building edges,
+    // but Obsidian's data engine also surfaces vault files as orphan
+    // nodes, so we strip them here regardless of how they arrived.
+    if (indexer?.isHidden) {
+      for (const path of Object.keys(nodes)) {
+        if (indexer.isHidden(path)) delete nodes[path];
+      }
+    }
 
     // If there are zero user-defined color groups AND auto-color is off,
     // there's nothing for us to do. Otherwise we still need to iterate
@@ -236,16 +258,27 @@ export class GraphColoringPatch {
     return null;
   }
 
-  // Pick a category string for a .typ path:
-  //   1. tags[0] from the parsed `#let meta = (...)` block, if any.
-  //   2. parent folder's basename (since folder ≈ category by the
+  // Pick a category string for a .typ path. Resolution order:
+  //   1. PROCESS_TAGS appearing anywhere in the tag list (in priority
+  //      order). These override the category because they're transient
+  //      states (needs_review) or sticky provenance (agent_drafted)
+  //      that the user wants to surface visually regardless of where
+  //      the note sits in the topic taxonomy.
+  //   2. tags[0] from the parsed `#let meta = (...)` block — the
+  //      "category" tag by convention.
+  //   3. Parent folder's basename (since folder ≈ category by the
   //      knowledge-base convention) as a fallback for legacy notes
   //      without a meta block.
-  // Returns null when both are empty (file at vault root, no meta).
+  // Returns null when nothing applies (file at vault root, no meta).
   private deriveCategory(path: string): string | null {
     const indexer = (this.plugin as any).metadataIndexer;
     const tags: string[] | undefined = indexer?.tagsByPath?.get(path);
-    if (tags && tags.length > 0 && tags[0]) return tags[0];
+    if (tags && tags.length > 0) {
+      for (const pt of PROCESS_TAGS) {
+        if (tags.includes(pt)) return pt;
+      }
+      if (tags[0]) return tags[0];
+    }
 
     const slash = path.lastIndexOf("/");
     if (slash < 0) return null;
@@ -256,8 +289,12 @@ export class GraphColoringPatch {
 }
 
 // Resolve a category name to a 24-bit packed RGB number suitable for
-// Obsidian's renderer worker. User-pinned overrides win; otherwise the
-// hash-derived HSL palette gives a deterministic per-category color.
+// Obsidian's renderer worker. Resolution order:
+//   1. User-pinned override from the `categoryColors` setting.
+//   2. Plugin-built-in default (currently only process tags like
+//      needs_review/agent_drafted).
+//   3. Deterministic hash-derived HSL palette so the same category
+//      always lands the same color across sessions and machines.
 function colorForCategory(
   category: string,
   overrides: Record<string, string>,
@@ -267,10 +304,13 @@ function colorForCategory(
     const rgb = parseHexRgb(pinned);
     if (rgb !== null) return rgb;
   }
-  // Deterministic hash → hue. Fixed S/L keeps the palette visually
-  // consistent (no garish max-saturation oranges next to washed-out
-  // pastels) and ensures the same category always lands the same color
-  // across sessions and machines.
+  const builtIn = DEFAULT_PROCESS_COLORS[category];
+  if (typeof builtIn === "string") {
+    const rgb = parseHexRgb(builtIn);
+    if (rgb !== null) return rgb;
+  }
+  // Fixed S/L keeps the palette visually consistent (no garish
+  // max-saturation oranges next to washed-out pastels).
   const hue = hashString(category) % 360;
   return hslToRgb(hue, 0.55, 0.55);
 }
