@@ -1,5 +1,19 @@
 import { Plugin, TFile, TAbstractFile } from "obsidian";
 
+// Structured view of a note's `#let meta = (...)` block. All fields are
+// optional because the parser is permissive — a malformed or partial
+// meta block still produces whatever fields it can. Consumers must
+// handle missing entries (typically the hover popover) gracefully.
+export interface NoteMeta {
+  title?: string;
+  status?: string;
+  created?: string;
+  modified?: string;
+  origin?: string;
+  tags: string[];
+  supersedes?: string;
+}
+
 // Parses `.typ` files for forward references and pushes them into
 // `app.metadataCache.resolvedLinks` so graph view and the Backlinks
 // pane include Typst files alongside Markdown notes.
@@ -11,19 +25,20 @@ import { Plugin, TFile, TAbstractFile } from "obsidian";
 //   @citationKey           (mapped to the .bib file that defines it)
 //
 // Also extracts the `#let meta = (...)` metadata block (see
-// knowledge-base convention) and exposes `tagsByPath` so the graph
-// view's color injection can derive a stable color per category.
+// knowledge-base convention) and exposes `metaByPath` so the graph
+// view's color injection can derive a stable color per category and
+// the hover-link popover can render structured note metadata.
 export class MetadataIndexer {
   private plugin: Plugin;
   // citation key -> vault path of the .bib file defining it. Populated
   // by indexBib() and refreshed when any .bib changes. Used so that a
   // `@key` in a .typ source can be wired to its bib's graph node.
   private bibKeyToPath: Map<string, string> = new Map();
-  // .typ path -> ordered list of tags from `#let meta = (...)`. First
-  // entry is the category by convention. Empty array means we parsed
-  // the file but found no meta block (or no tags); missing key means
-  // the file was never indexed. Consumed by graphColoring.ts.
-  public tagsByPath: Map<string, string[]> = new Map();
+  // .typ path -> structured meta dict from `#let meta = (...)`. Missing
+  // key means the file was never indexed; an entry with empty `tags`
+  // (and no other fields) means the file was indexed but had no meta
+  // block. Used by the hover-link popover and the graph color router.
+  public metaByPath: Map<string, NoteMeta> = new Map();
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -130,11 +145,11 @@ export class MetadataIndexer {
       for (const key of this.extractCitedKeys(content)) {
         unresolved[key] = (unresolved[key] || 0) + 1;
       }
-      const tags = this.extractMetaTags(content);
-      if (tags.length > 0) {
-        this.tagsByPath.set(file.path, tags);
+      const meta = this.extractMeta(content);
+      if (meta) {
+        this.metaByPath.set(file.path, meta);
       } else {
-        this.tagsByPath.delete(file.path);
+        this.metaByPath.delete(file.path);
       }
     } else if (file.extension === "bib") {
       // The bib file itself "links to" each entry it defines, so the
@@ -175,7 +190,7 @@ export class MetadataIndexer {
     if (cache.unresolvedLinks) {
       delete cache.unresolvedLinks[path];
     }
-    this.tagsByPath.delete(path);
+    this.metaByPath.delete(path);
     this.plugin.app.metadataCache.trigger("resolved");
   }
 
@@ -196,9 +211,9 @@ export class MetadataIndexer {
         }
       }
     }
-    if (this.tagsByPath.has(oldPath)) {
-      this.tagsByPath.set(file.path, this.tagsByPath.get(oldPath)!);
-      this.tagsByPath.delete(oldPath);
+    if (this.metaByPath.has(oldPath)) {
+      this.metaByPath.set(file.path, this.metaByPath.get(oldPath)!);
+      this.metaByPath.delete(oldPath);
     }
 
     if (file instanceof TFile && file.extension === "typ") {
@@ -250,26 +265,45 @@ export class MetadataIndexer {
     return out;
   }
 
-  // Extract the `tags: (...)` tuple from a `#let meta = ( ... )` block.
-  // Returns the tags in declaration order, or [] if no meta block is
-  // found, no tags field is present, or parsing fails. Deliberately
-  // permissive: we only need the first tag (the category) to be correct
-  // for color routing; extra tags after that are bonus metadata.
+  // Extract the full `#let meta = ( ... )` block into a typed object.
+  // Returns null if no meta block is found or the outer parens are
+  // unbalanced. Otherwise returns whatever fields parsed successfully —
+  // a malformed `origin` string won't prevent `tags` from being read.
   //
   // The block contents can be arbitrary Typst — strings with escapes,
-  // nested tuples, prose with commas — so we scan brace/paren depth and
-  // string state rather than splitting on commas. For the `tags` value
-  // we expect a parenthesized list of double-quoted strings, which is
-  // both what _template.typ documents and what every existing note uses.
-  private extractMetaTags(content: string): string[] {
+  // nested tuples, prose with commas — so we scan paren / brace depth
+  // and string state rather than splitting on commas. String-valued
+  // fields are parsed via the first double-quoted string in the value;
+  // `tags` is parsed as a parenthesized tuple of double-quoted strings.
+  private extractMeta(content: string): NoteMeta | null {
     const start = this.findMetaBlockStart(content);
-    if (start < 0) return [];
+    if (start < 0) return null;
     const inner = this.extractBalancedParens(content, start);
-    if (inner === null) return [];
+    if (inner === null) return null;
 
     const tagsValue = this.findFieldValue(inner, "tags");
-    if (tagsValue === null) return [];
-    return this.parseStringTuple(tagsValue);
+    const tags = tagsValue !== null ? this.parseStringTuple(tagsValue) : [];
+
+    return {
+      title: this.extractString(inner, "title"),
+      status: this.extractString(inner, "status"),
+      created: this.extractString(inner, "created"),
+      modified: this.extractString(inner, "modified"),
+      origin: this.extractString(inner, "origin"),
+      tags,
+      supersedes: this.extractString(inner, "supersedes"),
+    };
+  }
+
+  // Read a string-valued field from a meta block body. Returns the
+  // unescaped contents of the first double-quoted string in the
+  // value, or undefined if the field isn't present.
+  private extractString(body: string, field: string): string | undefined {
+    const raw = this.findFieldValue(body, field);
+    if (raw === null) return undefined;
+    const m = /"((?:[^"\\]|\\.)*)"/.exec(raw);
+    if (!m) return undefined;
+    return m[1].replace(/\\(.)/g, "$1");
   }
 
   // Locate the index *immediately after* the opening `(` of `#let meta = (`.

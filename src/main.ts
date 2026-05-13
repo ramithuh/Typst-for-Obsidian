@@ -18,6 +18,7 @@ import { TemplateVariableProvider } from "./templateVariableProvider";
 import { BacklinkParser, BACKLINK_URI_PREFIX } from "./backlinkParser";
 import { MetadataIndexer } from "./metadataIndexer";
 import { GraphColoringPatch } from "./graphColoring";
+import { TypstHoverPopover } from "./hoverPopover";
 import { BibView, BIB_VIEW_TYPE } from "./bibView";
 import { PackageManager } from "./packageManager";
 import { FontManager } from "./fontManager";
@@ -40,6 +41,7 @@ export default class TypstForObsidian extends Plugin {
   backlinkParser: BacklinkParser;
   metadataIndexer: MetadataIndexer;
   graphColoringPatch: GraphColoringPatch;
+  hoverPopover: TypstHoverPopover;
   packageManager: PackageManager;
   fontManager: FontManager;
   snippetManager: SnippetManager;
@@ -76,6 +78,13 @@ export default class TypstForObsidian extends Plugin {
     // setting is checked at runtime inside the patch.
     this.graphColoringPatch = new GraphColoringPatch(this);
     this.graphColoringPatch.register();
+
+    // Custom Cmd-hover popover for .typ files in the graph view. Reads
+    // structured meta (title, status, tags, modified, origin) from the
+    // metadata indexer and renders a richer preview than Obsidian's
+    // default empty popover for attachment files.
+    this.hoverPopover = new TypstHoverPopover(this);
+    this.hoverPopover.register();
 
     // Tell the WASM compiler to drop its cached source whenever a .typ
     // file in the vault changes, so the next compile re-reads it.

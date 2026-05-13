@@ -272,7 +272,7 @@ export class GraphColoringPatch {
   // Returns null when nothing applies (file at vault root, no meta).
   private deriveCategory(path: string): string | null {
     const indexer = (this.plugin as any).metadataIndexer;
-    const tags: string[] | undefined = indexer?.tagsByPath?.get(path);
+    const tags: string[] | undefined = indexer?.metaByPath?.get(path)?.tags;
     if (tags && tags.length > 0) {
       for (const pt of PROCESS_TAGS) {
         if (tags.includes(pt)) return pt;
